@@ -121,6 +121,8 @@ in
       serviceConfig = {
         # Daemon shells out to `nix path-info`; launchd provides no nix in PATH.
         EnvironmentVariables.PATH = "${config.nix.package}/bin:/usr/bin:/bin";
+        EnvironmentVariables.NIX_REMOTE = "daemon";
+        EnvironmentVariables.NIX_CONFIG = "store = daemon";
 
         ProgramArguments =
           let

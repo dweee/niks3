@@ -127,6 +127,10 @@ in
       after = [ "network.target" ];
       requires = [ "niks3-auto-upload.socket" ];
       path = [ config.nix.package ];
+      # Root registration must run through the daemon: ProtectSystem keeps the
+      # worker's /nix/var/nix read-only while the daemon owns gcroots/auto.
+      environment.NIX_REMOTE = "daemon";
+      environment.NIX_CONFIG = "store = daemon";
 
       serviceConfig = {
         Type = "simple";
