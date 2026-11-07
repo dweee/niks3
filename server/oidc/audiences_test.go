@@ -59,6 +59,11 @@ func TestDistinctAudiencesKeepScopesSeparate(t *testing.T) {
 			}
 		})
 	}
+	if _, err := validator.ValidateToken(ctx, oidctest.SignToken(t, m, jwt.MapClaims{
+		"aud": []string{"cache-read", "cache-write"}, "repository": "example/tool", "event_name": "push",
+	})); err == nil {
+		t.Fatal("ambiguous multi-audience token was accepted")
+	}
 }
 
 func TestIdenticalIssuerAndAudienceRemainRejected(t *testing.T) {

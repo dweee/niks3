@@ -240,6 +240,20 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenString string) (*Val
 
 			continue
 		}
+		// A multi-audience token must not choose a scope policy based on Go
+		// map iteration order. Require one configured audience for this issuer.
+		matchingAudiences := 0
+		for _, other := range v.verifiers {
+			if other.config.Issuer == pv.config.Issuer && slices.Contains(idToken.Audience, other.config.Audience) {
+				matchingAudiences++
+			}
+		}
+		if matchingAudiences > 1 {
+			return nil, &ValidationError{
+				Reason:   "token matches multiple configured audiences",
+				Provider: pv.config.Name(), TriedProviders: triedProviders,
+			}
+		}
 
 		// Token verified! Extract claims
 		var claims map[string]any
