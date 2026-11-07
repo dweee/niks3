@@ -385,12 +385,19 @@ func TestService_RequireScope_OIDC(t *testing.T) {
 		return map[string]string{"Authorization": req.Header.Get("Authorization")}
 	}
 
-	expect := func(code int) *func(*testing.T, *httptest.ResponseRecorder) {
+	expect := func(code int, scope oidc.Scope) *func(*testing.T, *httptest.ResponseRecorder) {
 		f := func(t *testing.T, w *httptest.ResponseRecorder) {
 			t.Helper()
 
 			if w.Code != code {
 				t.Errorf("status = %d, want %d", w.Code, code)
+			}
+			want := ""
+			if scope == oidc.ScopeRead && code == http.StatusOK {
+				want = "true"
+			}
+			if got := w.Header().Get("X-Niks3-Authenticated-Read"); got != want {
+				t.Errorf("authenticated read marker = %q, want %q", got, want)
 			}
 		}
 
@@ -430,7 +437,7 @@ func TestService_RequireScope_OIDC(t *testing.T) {
 				path:          "/health",
 				handler:       service.RequireScope(tc.scope, service.HealthCheckHandler),
 				header:        tc.header,
-				checkResponse: expect(tc.code),
+				checkResponse: expect(tc.code, tc.scope),
 			})
 		})
 	}
@@ -444,9 +451,19 @@ func TestService_ReadScope_PublicByDefault(t *testing.T) {
 	service.Pool.Close()
 
 	// No read rules anywhere: reads stay public so plain Nix substituters work.
+	checkPublic := func(t *testing.T, w *httptest.ResponseRecorder) {
+		t.Helper()
+		if w.Code != http.StatusOK {
+			t.Errorf("public read status = %d, want %d", w.Code, http.StatusOK)
+		}
+		if got := w.Header().Get("X-Niks3-Authenticated-Read"); got != "" {
+			t.Errorf("public read unexpectedly attested authentication: %q", got)
+		}
+	}
 	testRequest(t, &TestRequest{
-		method:  "GET",
-		path:    "/health",
-		handler: service.RequireScope(oidc.ScopeRead, service.HealthCheckHandler),
+		method:        "GET",
+		path:          "/health",
+		handler:       service.RequireScope(oidc.ScopeRead, service.HealthCheckHandler),
+		checkResponse: &checkPublic,
 	})
 }
