@@ -79,40 +79,6 @@ func (q *Queue) Enqueue(paths []string) error {
 	return q.enqueue(paths)
 }
 
-func (q *Queue) enqueue(paths []string) error {
-	if len(paths) == 0 {
-		return nil
-	}
-
-	ctx := context.Background()
-
-	tx, err := q.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-
-	defer func() { _ = tx.Rollback() }()
-
-	stmt, err := tx.PrepareContext(ctx, "INSERT OR IGNORE INTO upload_queue (store_path) VALUES (?)")
-	if err != nil {
-		return fmt.Errorf("prepare statement: %w", err)
-	}
-
-	defer func() { _ = stmt.Close() }()
-
-	for _, p := range paths {
-		if _, err := stmt.ExecContext(ctx, p); err != nil {
-			return fmt.Errorf("inserting path %q: %w", p, err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	return nil
-}
-
 // FetchBatch returns up to batchSize store paths from the head of the queue.
 // rowid rather than created_at (second resolution) gives the strict order
 // Retry relies on.
@@ -178,43 +144,6 @@ func (q *Queue) Remove(paths []string) error {
 	return nil
 }
 
-func (q *Queue) remove(paths []string) error {
-	if len(paths) == 0 {
-		return nil
-	}
-
-	ctx := context.Background()
-
-	tx, err := q.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-
-	defer func() { _ = tx.Rollback() }()
-
-	for len(paths) > 0 {
-		n := min(len(paths), removeChunk)
-		chunk := paths[:n]
-		paths = paths[n:]
-
-		args := make([]any, n)
-		for i, p := range chunk {
-			args[i] = p
-		}
-
-		query := "DELETE FROM upload_queue WHERE store_path IN (?" + strings.Repeat(",?", n-1) + ")" //nolint:gosec // only "?" placeholders
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("deleting paths: %w", err)
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	return nil
-}
-
 // Retry moves paths whose upload failed to the back of the queue so that one
 // bad path cannot block the head. As a consequence everything already tried
 // sorts behind everything untried.
@@ -257,6 +186,77 @@ func (q *Queue) Count() (int, error) {
 func (q *Queue) Close() error {
 	if err := q.db.Close(); err != nil {
 		return fmt.Errorf("closing database: %w", err)
+	}
+
+	return nil
+}
+
+func (q *Queue) enqueue(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, "INSERT OR IGNORE INTO upload_queue (store_path) VALUES (?)")
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+
+	defer func() { _ = stmt.Close() }()
+
+	for _, p := range paths {
+		if _, err := stmt.ExecContext(ctx, p); err != nil {
+			return fmt.Errorf("inserting path %q: %w", p, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (q *Queue) remove(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	ctx := context.Background()
+
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	for len(paths) > 0 {
+		n := min(len(paths), removeChunk)
+		chunk := paths[:n]
+		paths = paths[n:]
+
+		args := make([]any, n)
+		for i, p := range chunk {
+			args[i] = p
+		}
+
+		query := "DELETE FROM upload_queue WHERE store_path IN (?" + strings.Repeat(",?", n-1) + ")" //nolint:gosec // only "?" placeholders
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("deleting paths: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
 	}
 
 	return nil

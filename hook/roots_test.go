@@ -1,4 +1,4 @@
-package hook
+package hook //nolint:testpackage // Exercises injected GC registration and queue crash recovery internals.
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -73,7 +74,11 @@ func (f *rootFixture) command(_ context.Context, name string, args ...string) er
 		return nil
 	}
 
-	return os.Symlink(output, root)
+	if err := os.Symlink(output, root); err != nil {
+		return fmt.Errorf("creating fixture root: %w", err)
+	}
+
+	return nil
 }
 
 func (f *rootFixture) open(t *testing.T) *Queue {
@@ -168,7 +173,8 @@ func TestRootsSurviveRetryAndQueueRestart(t *testing.T) {
 func TestFailedUploadAndCancelledUploadKeepRoots(t *testing.T) {
 	t.Parallel()
 	for _, cancelled := range []bool{false, true} {
-		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+		t.Run(strconv.FormatBool(cancelled), func(t *testing.T) {
+			t.Parallel()
 			f := newRootFixture(t)
 			q := f.open(t)
 			output := fixtureOutput("unpublished")
@@ -266,6 +272,7 @@ func TestOutputValidationRejectsEntireBatchBeforeRootCommands(t *testing.T) {
 	t.Parallel()
 	for _, invalid := range []string{"relative", "/nix/store/short-name", fixtureOutput("foo") + "/child", fixtureOutput("foo.drv"), fixtureOutput("foo;touch-x"), fixtureOutput("foo") + "/../escape"} {
 		t.Run(invalid, func(t *testing.T) {
+			t.Parallel()
 			f := newRootFixture(t)
 			q := f.open(t)
 			if err := q.Enqueue([]string{fixtureOutput("valid"), invalid}); err == nil {
@@ -354,6 +361,7 @@ func TestWorkerDoesNotTreatInspectionFailureAsInvalidOutput(t *testing.T) {
 func TestStartupRejectsRootDirectorySymlinksAndUnexpectedTargets(t *testing.T) {
 	t.Parallel()
 	t.Run("directory symlink", func(t *testing.T) {
+		t.Parallel()
 		f := newRootFixture(t)
 		if err := os.Symlink(t.TempDir(), filepath.Join(filepath.Dir(f.db), "gcroots")); err != nil {
 			t.Fatal(err)
@@ -364,6 +372,7 @@ func TestStartupRejectsRootDirectorySymlinksAndUnexpectedTargets(t *testing.T) {
 		}
 	})
 	t.Run("unexpected root target", func(t *testing.T) {
+		t.Parallel()
 		f := newRootFixture(t)
 		q := f.open(t)
 		_ = q.Close()
