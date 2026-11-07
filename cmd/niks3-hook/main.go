@@ -161,7 +161,7 @@ func runServe() error {
 	}
 
 	// Open the SQLite queue.
-	queue, err := hook.OpenQueue(*dbPath)
+	queue, err := hook.OpenQueueWithRoots(*dbPath)
 	if err != nil {
 		return fmt.Errorf("opening queue: %w", err)
 	}

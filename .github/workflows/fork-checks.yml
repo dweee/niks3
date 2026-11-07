@@ -7,7 +7,11 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -19,3 +23,5 @@ jobs:
           kvm: false
       - name: Validate OIDC audience and scope isolation
         run: nix shell --no-write-lock-file --inputs-from . nixpkgs#go nixpkgs#stdenv.cc -c go test ./server/oidc ./cmdutil
+      - name: Validate queued output retention and races
+        run: nix shell --no-write-lock-file --inputs-from . nixpkgs#go nixpkgs#stdenv.cc -c go test -race ./hook ./cmd/niks3-hook
