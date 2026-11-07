@@ -39,6 +39,7 @@ func TestDistinctAudiencesKeepScopesSeparate(t *testing.T) {
 		{"cache-read", "example/tool", "pull_request", ""},
 	} {
 		t.Run(tc.audience+"/"+tc.repository+"/"+tc.event, func(t *testing.T) {
+			t.Parallel()
 			claims, err := validator.ValidateToken(ctx, oidctest.SignToken(t, m, jwt.MapClaims{
 				"aud": tc.audience, "repository": tc.repository, "event_name": tc.event,
 			}))
@@ -46,6 +47,7 @@ func TestDistinctAudiencesKeepScopesSeparate(t *testing.T) {
 				if err == nil {
 					t.Fatal("unexpected token grant")
 				}
+
 				return
 			}
 			if err != nil {
