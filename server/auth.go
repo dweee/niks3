@@ -107,6 +107,12 @@ func (s *Service) RequireScope(scope oidc.Scope, next http.HandlerFunc) http.Han
 			return
 		}
 
+		// A proxy can require this marker to fail closed while an older or
+		// public-read backend is still serving during deployment or rollback.
+		if scope == oidc.ScopeRead {
+			w.Header().Set("X-Niks3-Authenticated-Read", "true")
+		}
+
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
 	}
 }
