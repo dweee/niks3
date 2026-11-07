@@ -47,7 +47,7 @@ func (e *ValidationError) Unwrap() error {
 // Validator validates OIDC tokens against configured providers.
 type Validator struct {
 	config    *Config
-	verifiers map[string]*providerVerifier // issuer -> verifier
+	verifiers map[string]*providerVerifier // provider name -> verifier
 }
 
 type providerVerifier struct {
@@ -168,7 +168,7 @@ func NewValidator(ctx context.Context, cfg *Config) (*Validator, error) {
 			ClientID: providerCfg.Audience,
 		})
 
-		v.verifiers[providerCfg.Issuer] = &providerVerifier{
+		v.verifiers[name] = &providerVerifier{
 			provider: provider,
 			verifier: verifier,
 			config:   providerCfg,
@@ -209,13 +209,19 @@ func (v *Validator) ReservesPin(name string) bool {
 // AudienceForIssuer returns the configured audience for the given issuer URL,
 // and whether a provider is configured for that issuer.
 func (v *Validator) AudienceForIssuer(issuer string) (string, bool) {
+	var audience string
 	for _, p := range v.config.Providers {
 		if p.Issuer == issuer {
-			return p.Audience, true
+			if audience != "" && audience != p.Audience {
+				// The caller must choose explicitly when one issuer has several
+				// audiences; never advertise one based on Go map iteration order.
+				return "", false
+			}
+			audience = p.Audience
 		}
 	}
 
-	return "", false
+	return audience, audience != ""
 }
 
 // ValidateToken validates a JWT token and returns the validated claims.
@@ -225,7 +231,7 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenString string) (*Val
 
 	// Try each provider's verifier
 	// go-oidc will check issuer claim matches the provider
-	for issuer, pv := range v.verifiers {
+	for _, pv := range v.verifiers {
 		triedProviders = append(triedProviders, pv.config.Name())
 
 		idToken, err := pv.verifier.Verify(ctx, tokenString)
@@ -262,7 +268,7 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenString string) (*Val
 
 		return &ValidatedClaims{
 			Subject:   idToken.Subject,
-			Issuer:    issuer,
+			Issuer:    pv.config.Issuer,
 			Provider:  pv.config.Name(),
 			Scopes:    scopes,
 			Pins:      pins,

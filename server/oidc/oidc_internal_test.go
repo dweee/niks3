@@ -41,3 +41,14 @@ func TestAudienceForIssuer(t *testing.T) {
 		}
 	}
 }
+
+func TestAudienceForIssuerRequiresExplicitChoiceWhenAmbiguous(t *testing.T) {
+	t.Parallel()
+	v := &Validator{config: &Config{Providers: map[string]*ProviderConfig{
+		"reader": {Issuer: "https://issuer.example", Audience: "read"},
+		"writer": {Issuer: "https://issuer.example", Audience: "write"},
+	}}}
+	if audience, ok := v.AudienceForIssuer("https://issuer.example"); ok || audience != "" {
+		t.Fatalf("ambiguous audience advertised: %q, %v", audience, ok)
+	}
+}
