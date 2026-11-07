@@ -204,7 +204,8 @@ func (c *Config) validate() error {
 		return errors.New("no providers configured")
 	}
 
-	issuers := make(map[string]string) // issuer -> provider name
+	type providerIdentity struct{ issuer, audience string }
+	identities := make(map[providerIdentity]string)
 
 	for name, provider := range c.Providers {
 		if provider.Issuer == "" {
@@ -239,13 +240,15 @@ func (c *Config) validate() error {
 			return fmt.Errorf("provider %q: %w", name, err)
 		}
 
-		// Check for duplicate issuers
-		if existing, ok := issuers[provider.Issuer]; ok {
-			return fmt.Errorf("provider %q: duplicate issuer (already used by %q)",
+		// Distinct audiences may have different scope policies at one issuer.
+		// Reject an identical pair so token policy selection stays unambiguous.
+		identity := providerIdentity{provider.Issuer, provider.Audience}
+		if existing, ok := identities[identity]; ok {
+			return fmt.Errorf("provider %q: duplicate issuer and audience (already used by %q)",
 				name, existing)
 		}
 
-		issuers[provider.Issuer] = name
+		identities[identity] = name
 	}
 
 	return nil
