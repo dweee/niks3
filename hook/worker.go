@@ -3,6 +3,7 @@ package hook
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"time"
@@ -168,12 +169,22 @@ func (w *Worker) step(ctx context.Context) ([]string, bool) {
 	}
 
 	var existing, gced []string
+	// A dangling symlink can itself be a valid Nix output; check the store
+	// object, not whether its target currently exists on this machine.
+	stat := os.Lstat
+	if w.queue.roots != nil {
+		stat = w.queue.roots.stat
+	}
 
 	for _, p := range paths {
-		if _, err := os.Stat(p); err != nil {
+		if _, err := stat(p); errors.Is(err, os.ErrNotExist) {
 			slog.Warn("Store path no longer exists (garbage collected?), removing from queue", "path", p)
 
 			gced = append(gced, p)
+		} else if err != nil {
+			// Failure to inspect a retained path does not prove it is invalid.
+			// Preserve its queue entry and root for a later retry.
+			slog.Error("Cannot inspect pending store path, retaining it", "path", p, "error", err)
 		} else {
 			existing = append(existing, p)
 		}
@@ -182,7 +193,7 @@ func (w *Worker) step(ctx context.Context) ([]string, bool) {
 	w.remove(gced)
 
 	if len(existing) == 0 {
-		return paths, true
+		return paths, len(gced) > 0
 	}
 
 	return paths, w.upload(ctx, existing)

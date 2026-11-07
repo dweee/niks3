@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	// Pure-Go SQLite driver (no CGO required).
 	_ "modernc.org/sqlite"
@@ -15,6 +16,10 @@ import (
 // Queue wraps a SQLite database for persisting store paths that need uploading.
 type Queue struct {
 	db *sql.DB
+	// Root operations and queue transactions must have the same ordering.
+	// Otherwise a completed upload could unlink a newly enqueued path's root.
+	mu    sync.Mutex
+	roots *gcRoots
 }
 
 // OpenQueue opens (or creates) the SQLite database at dbPath.
@@ -53,6 +58,28 @@ func OpenQueue(dbPath string) (*Queue, error) {
 
 // Enqueue inserts store paths into the queue, silently ignoring duplicates.
 func (q *Queue) Enqueue(paths []string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.roots != nil {
+		for _, p := range paths {
+			if err := validateOutputPath(p); err != nil {
+				return err
+			}
+		}
+		for _, p := range paths {
+			if err := q.roots.register(p); err != nil {
+				// Keep any roots already created: startup recovery will enqueue
+				// them even if this batch's database transaction never happens.
+				return err
+			}
+		}
+	}
+
+	return q.enqueue(paths)
+}
+
+func (q *Queue) enqueue(paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
@@ -123,8 +150,35 @@ func (q *Queue) FetchBatch(batchSize int) ([]string, error) {
 // worker removes whole closures, which can be larger than that.
 const removeChunk = 1000
 
-// Remove deletes the given store paths from the queue.
+// Remove deletes paths after confirmed publication or explicit invalid-path
+// handling. Their roots remain until the database deletion has committed.
 func (q *Queue) Remove(paths []string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.roots != nil {
+		for _, p := range paths {
+			if err := validateOutputPath(p); err != nil {
+				return err
+			}
+		}
+	}
+	if err := q.remove(paths); err != nil {
+		return err
+	}
+	if q.roots != nil {
+		for _, p := range paths {
+			if err := q.roots.remove(p); err != nil {
+				// A leftover root is safe; restart recovery queues it again.
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (q *Queue) remove(paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
