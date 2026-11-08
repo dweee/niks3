@@ -18,6 +18,14 @@ Set DAVE_FORK_CI_ENABLED=true and NIKS3_PUSH_ENABLED=true to enable the native
 workflow and trusted publication. The backend reader rollout must be applied
 before default-branch authenticated reuse is verified.
 
-Existing upstream release/container workflows remain separate. Their Nix
-bootstrap and actual build paths still need an explicit authenticated-cache
-integration audit before this repository’s migration is complete.
+The existing GoReleaser and container build jobs configure the same read-only
+cache. Container builds retain completed graph outputs and export bounded data
+to the separate reusable publisher; its writer is never available to image
+builds or registry publication. These paths require trusted-event CI proof
+after the backend reader rollout. Registry images and release archives retain
+the upstream publishing behavior.
+
+The Dependabot vendor-hash job runs on a PR, so it receives no private cache
+reader or publisher. Its Go/shell tools now resolve from the repository’s locked
+nixpkgs input. Intentional fixed-output hash mismatches are not valid store
+outputs; corrected hashes are subsequently built and retained by native CI.

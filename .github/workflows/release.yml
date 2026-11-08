@@ -26,6 +26,8 @@ jobs:
           extra_nix_config: |
             extra-substituters = https://cache.thalheim.io
             extra-trusted-public-keys = cache.thalheim.io-1:R7msbosLEZKrxk/lKxf9BTjOOH7Ax3H0Qj0/6wiHOgc=
+      - name: Configure read-only Niks3 cache
+        run: python3 ci/configure-niks3.py --oidc
       - name: Run GoReleaser
         run: nix shell --inputs-from . nixpkgs#goreleaser --command goreleaser release --clean
         env:
@@ -35,6 +37,9 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-checksums: dist/checksums.txt
+      - name: Remove job-local Niks3 reader
+        if: ${{ always() }}
+        run: python3 ci/configure-niks3.py --cleanup
   helm-chart:
     runs-on: ubuntu-latest
     permissions:

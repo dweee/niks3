@@ -19,12 +19,11 @@ jobs:
         uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-          nix_path: nixpkgs=channel:nixos-unstable
       - name: Update checksum
         env:
           HEAD_REF: ${{ github.head_ref }}
         run: |
-          ./.github/workflows/update-vendor-hash.sh
+          nix shell --inputs-from . nixpkgs#go nixpkgs#coreutils nixpkgs#gnused nixpkgs#gawk --command bash .github/workflows/update-vendor-hash.sh
           # git push if we have a diff
           if [[ -n $(git diff) ]]; then
             git add nix/packages/goVendorHash*.txt
