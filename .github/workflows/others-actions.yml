@@ -110,13 +110,25 @@ jobs:
             echo "Package build: ${SECONDS}s"
             cat outputs.txt
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Verify the application CLI and native bundle
+      - name: Verify the selected native executable or container archive
+        env:
+          TARGET_PACKAGE: ${{ matrix.package }}
         run: |
+          set -euo pipefail
           package=$(head -n 1 outputs.txt)
-          "$package/bin/handy" --help | grep -F -- '--toggle-transcription'
-          if [ "${{ runner.os }}" = macOS ]; then
-            test -x "$package/Applications/Handy.app/Contents/MacOS/handy"
-          fi
+          case "$TARGET_PACKAGE" in
+            niks3|niks3-hook|niks3-server)
+              test -x "$package/bin/$TARGET_PACKAGE"
+              "$package/bin/$TARGET_PACKAGE" --help > cli-help.txt 2>&1
+              test -s cli-help.txt
+              ;;
+            niks3-docker)
+              test -s "$package"
+              tar -tf "$package" > image-contents.txt
+              grep -Eq '(^|/)(manifest|index)\.json$' image-contents.txt
+              ;;
+            *) exit 1 ;;
+          esac
       - name: Remove private read credentials before exporting build data
         if: ${{ always() }}
         run: python3 ci/configure-niks3.py --cleanup
