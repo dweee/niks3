@@ -5,7 +5,7 @@
   "test-public-closure.py": "3bd9af13fd9d8378431f34d6716953c83e44e342dd52d4564afb9858efc933d2",
   "configure-attic-read.py": "4b663ae0e073327dbcdcdaabef23a58a0a241f2f0fcfe3fd5f351b9242cbf669",
   "test-configure-attic-read.py": "0da4ab239a398a9aca5a179ad83dd0c6b4665f241706f307d6e1626987e78507",
-  "configure-niks3.py": "344f8465ab92c8c3276aeae631ff8902c074b050d15085b9296ad961c3af9a83",
+  "configure-niks3.py": "f1690b26b7e2762c083f34c8473d19873de9958ef376a78be46006b1073d4dc8",
   "push-niks3.py": "b97bbcb63a5d305a4062196e1f52b0912b1a88e735731407bbcbaab39a8b466b",
   "test-push-niks3.py": "a94920042ed3eb03f2a6d970f494de93237658632d7712227e60cfc89492aec2",
   "niks3-oidc-token.py": "58569dc6c6d05232300aae7d03848c66f8678f832d51a1a5326f034da41b2e5f",
