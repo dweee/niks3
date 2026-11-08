@@ -20,6 +20,34 @@
       {
         "attribute": "packages.aarch64-darwin.niks3-server",
         "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.niks3-docker",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.mock-oidc-server",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.niks3-openbao-signer",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.niks3-pkcs11-signer",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.niks3-tests",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.benchmark-closure",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.benchmark-disk-image",
+        "visibility": "public"
       }
     ],
     "aarch64-linux": [
@@ -38,6 +66,30 @@
       {
         "attribute": "packages.aarch64-linux.niks3-docker",
         "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.mock-oidc-server",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.niks3-openbao-signer",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.niks3-pkcs11-signer",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.niks3-tests",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.benchmark-closure",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.benchmark-disk-image",
+        "visibility": "public"
       }
     ],
     "x86_64-linux": [
@@ -55,6 +107,30 @@
       },
       {
         "attribute": "packages.x86_64-linux.niks3-docker",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.mock-oidc-server",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.niks3-openbao-signer",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.niks3-pkcs11-signer",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.niks3-tests",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.benchmark-closure",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.benchmark-disk-image",
         "visibility": "public"
       }
     ]
