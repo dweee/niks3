@@ -35,11 +35,11 @@ class NativeInventory(unittest.TestCase):
         self.assertTrue(all(j['runner'] == matrix.RUNNERS[j['system']] for j in jobs))
         self.assertTrue(all(j['kvm'] == (j['system'] == 'x86_64-linux' and j['package'].startswith('nixos-test-')) for j in jobs))
 
-    def test_channel_metadata_accounts_for_the_same_native_roots(self):
+    def test_channel_package_metadata_matches_native_packages(self):
         policy = json.loads((ROOT / 'ci/channels.json').read_text())
         declared = {target['attribute'] for targets in policy['targets'].values() for target in targets}
         jobs = matrix.jobs(self.inventory, self.declared, 'darwin')['include'] + matrix.jobs(self.inventory, self.declared, 'others')['include']
-        self.assertEqual(declared, {'.'.join((j['set'], j['system'], j['package'])) for j in jobs})
+        self.assertEqual(declared, {'.'.join((j['set'], j['system'], j['package'])) for j in jobs if j['set'] == 'packages'})
 
     def test_unclassified_system_package_and_missing_shell_alias_fail(self):
         for change in ['package', 'system', 'alias', 'shell']:

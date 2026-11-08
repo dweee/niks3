@@ -48,26 +48,6 @@
       {
         "attribute": "packages.aarch64-darwin.benchmark-disk-image",
         "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-darwin.devShell-default",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-darwin.treefmt",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-darwin.version-sync",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-darwin.go-unit-tests",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-darwin.golangci-lint",
-        "visibility": "public"
       }
     ],
     "aarch64-linux": [
@@ -110,46 +90,6 @@
       {
         "attribute": "packages.aarch64-linux.benchmark-disk-image",
         "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.devShell-default",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.treefmt",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.version-sync",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.go-unit-tests",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.golangci-lint",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.nixos-test-niks3",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.nixos-test-niks3-lix",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.nixos-test-read-proxy",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.nixos-test-external-signer",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.aarch64-linux.nixos-test-k3s",
-        "visibility": "public"
       }
     ],
     "x86_64-linux": [
@@ -191,46 +131,6 @@
       },
       {
         "attribute": "packages.x86_64-linux.benchmark-disk-image",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.devShell-default",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.treefmt",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.version-sync",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.go-unit-tests",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.golangci-lint",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.nixos-test-niks3",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.nixos-test-niks3-lix",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.nixos-test-read-proxy",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.nixos-test-external-signer",
-        "visibility": "public"
-      },
-      {
-        "attribute": "checks.x86_64-linux.nixos-test-k3s",
         "visibility": "public"
       }
     ]
