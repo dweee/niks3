@@ -2,18 +2,37 @@
   "aarch64-darwin": [
     "niks3",
     "niks3-hook",
-    "niks3-server"
+    "niks3-server",
+    "niks3-docker",
+    "mock-oidc-server",
+    "niks3-openbao-signer",
+    "niks3-pkcs11-signer",
+    "niks3-tests",
+    "benchmark-closure",
+    "benchmark-disk-image"
   ],
   "aarch64-linux": [
     "niks3",
     "niks3-hook",
     "niks3-server",
-    "niks3-docker"
+    "niks3-docker",
+    "mock-oidc-server",
+    "niks3-openbao-signer",
+    "niks3-pkcs11-signer",
+    "niks3-tests",
+    "benchmark-closure",
+    "benchmark-disk-image"
   ],
   "x86_64-linux": [
     "niks3",
     "niks3-hook",
     "niks3-server",
-    "niks3-docker"
+    "niks3-docker",
+    "mock-oidc-server",
+    "niks3-openbao-signer",
+    "niks3-pkcs11-signer",
+    "niks3-tests",
+    "benchmark-closure",
+    "benchmark-disk-image"
   ]
 }
