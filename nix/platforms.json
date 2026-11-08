@@ -1,0 +1,19 @@
+{
+  "aarch64-darwin": [
+    "niks3",
+    "niks3-hook",
+    "niks3-server"
+  ],
+  "aarch64-linux": [
+    "niks3",
+    "niks3-hook",
+    "niks3-server",
+    "niks3-docker"
+  ],
+  "x86_64-linux": [
+    "niks3",
+    "niks3-hook",
+    "niks3-server",
+    "niks3-docker"
+  ]
+}

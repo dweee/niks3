@@ -1,0 +1,56 @@
+name: Publish bounded Nix cache artifact
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: ${{ github.repository == 'dweee/niks3' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && vars.NIKS3_PUSH_ENABLED == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        with:
+          source-tag: v3.24.1
+          summarize: false
+          kvm: false
+          extra-conf: |
+            experimental-features = nix-command flakes parallel-eval
+            eval-cores = 2
+            accept-flake-config = false
+            substituters = https://cache.nixos.org/
+            extra-substituters =
+      - name: Verify Determinate client and daemon
+        run: |
+          nix --version | grep -F "Determinate Nix 3.24.1"
+          nix store info --store daemon --json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.artifact }}
+          path: attic-transfer
+      - name: Read Niks3 before installing the pinned publisher
+        run: python3 ci/configure-niks3.py --oidc
+      - name: Install pinned Niks3 publisher
+        run: bash ci/install-niks3.sh --retain-bootstrap
+      - name: Publish bootstrap client and completed build dependencies
+        run: python3 ci/push-niks3.py --outputs niks3-bootstrap-outputs.txt
+      - name: Import data without running any package programs
+        timeout-minutes: 15
+        env:
+          ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
+        run: python3 ci/transfer-attic.py import --directory attic-transfer
+      - name: Publish to Niks3 with GitHub OIDC and verify S3 integrity
+        run: python3 ci/push-niks3.py --outputs attic-transfer/outputs.txt
+      - name: Remove job-local Niks3 reader
+        if: ${{ always() }}
+        run: python3 ci/configure-niks3.py --cleanup

@@ -41,9 +41,26 @@ jobs:
           extra_nix_config: |
             extra-substituters = https://cache.thalheim.io
             extra-trusted-public-keys = cache.thalheim.io-1:R7msbosLEZKrxk/lKxf9BTjOOH7Ax3H0Qj0/6wiHOgc=
-      - name: Build Docker image
+      - name: Configure read-only Niks3 cache
+        run: python3 ci/configure-niks3.py --oidc
+      - name: Build Docker image and retain completed dependencies
         run: |
-          nix build .#niks3-docker --print-build-logs
+          python3 ci/retain-build-outputs.py --target .#niks3-docker --manifest cache-outputs.txt -- nix build .#niks3-docker --print-build-logs
+      - name: Export completed public outputs as bounded data
+        id: cache_transfer
+        if: ${{ always() && !cancelled() && hashFiles('cache-outputs.txt') != '' }}
+        env:
+          ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
+        run: python3 ci/transfer-attic.py export --directory attic-transfer --manifest cache-outputs.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ always() && !cancelled() && steps.cache_transfer.outcome == 'success' }}
+        with:
+          name: niks3-docker-cache-${{ github.sha }}
+          path: attic-transfer/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: false
       - name: Push images
         id: push
         env:
@@ -72,6 +89,18 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+      - name: Remove build-job Niks3 reader
+        if: ${{ always() }}
+        run: python3 ci/configure-niks3.py --cleanup
+  publish-cache:
+    needs: build
+    if: ${{ always() && !cancelled() && (needs.build.result == 'success' || needs.build.result == 'failure') && vars.NIKS3_PUSH_ENABLED == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-cache-artifact.yml
+    with:
+      artifact: niks3-docker-cache-${{ github.sha }}
   # GHCR stores the per-arch children of a multi-arch index as untagged
   # versions. A naive "delete untagged" (actions/delete-package-versions) broke
   # every release tag once already (#291). ghcr-cleanup-action walks the index

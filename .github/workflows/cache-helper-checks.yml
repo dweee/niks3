@@ -1,0 +1,27 @@
+name: Cache helper checks
+on:
+  pull_request:
+  push:
+    branches: [flakey]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Test cache boundaries and inventory
+        run: |
+          set -euo pipefail
+          for test_file in ci/test-*.py; do python3 "$test_file"; done
+          python3 ci/release-channel.py policy
+          python3 - <<'PYHASH'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('ci')
+          for name,wanted in json.loads((root/'channel-tool-hashes.json').read_text()).items():
+              assert hashlib.sha256((root/name).read_bytes()).hexdigest()==wanted, name
+          PYHASH
