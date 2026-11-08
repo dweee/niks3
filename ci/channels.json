@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "forge": "github",
+  "repository": "dweee/niks3",
+  "branch": "flakey",
+  "remote": "https://github.com/dweee/niks3.git",
+  "submodules": false,
+  "integrationInventory": false,
+  "excludedSystems": [],
+  "targets": {
+    "aarch64-darwin": [
+      {
+        "attribute": "packages.aarch64-darwin.niks3",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.niks3-hook",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-darwin.niks3-server",
+        "visibility": "public"
+      }
+    ],
+    "aarch64-linux": [
+      {
+        "attribute": "packages.aarch64-linux.niks3",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.niks3-hook",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.niks3-server",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.aarch64-linux.niks3-docker",
+        "visibility": "public"
+      }
+    ],
+    "x86_64-linux": [
+      {
+        "attribute": "packages.x86_64-linux.niks3",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.niks3-hook",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.niks3-server",
+        "visibility": "public"
+      },
+      {
+        "attribute": "packages.x86_64-linux.niks3-docker",
+        "visibility": "public"
+      }
+    ]
+  }
+}

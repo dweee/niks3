@@ -7,6 +7,9 @@ permissions:
   contents: read
 jobs:
   test:
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       matrix:
         runner: [ubuntu-24.04, macos-15]
@@ -21,7 +24,13 @@ jobs:
           source-tag: v3.24.1
           summarize: false
           kvm: false
+      - name: Configure read-only Niks3 for trusted default-branch checks
+        if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+        run: python3 ci/configure-niks3.py --oidc
       - name: Validate OIDC audience and scope isolation
         run: nix shell --no-write-lock-file --inputs-from . nixpkgs#go nixpkgs#stdenv.cc -c go test ./server/oidc ./cmdutil
       - name: Validate queued output retention and races
         run: nix shell --no-write-lock-file --inputs-from . nixpkgs#go nixpkgs#stdenv.cc -c go test -race ./hook ./cmd/niks3-hook
+      - name: Remove job-local Niks3 reader
+        if: ${{ always() }}
+        run: python3 ci/configure-niks3.py --cleanup
