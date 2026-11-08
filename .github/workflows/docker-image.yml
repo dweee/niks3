@@ -13,6 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       packages: write
       id-token: write
       attestations: write
@@ -45,7 +46,7 @@ jobs:
         run: python3 ci/configure-niks3.py --oidc
       - name: Build Docker image and retain completed dependencies
         run: |
-          python3 ci/retain-build-outputs.py --target .#niks3-docker --manifest cache-outputs.txt -- nix build .#niks3-docker --print-build-logs
+          python3 ci/retain-build-outputs.py --target .#niks3-docker --manifest cache-outputs.txt -- nix build .#niks3-docker --print-out-paths --print-build-logs
       - name: Export completed public outputs as bounded data
         id: cache_transfer
         if: ${{ always() && !cancelled() && hashFiles('cache-outputs.txt') != '' }}
