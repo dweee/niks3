@@ -4,6 +4,10 @@ let
   inherit (pkgs) lib writeText;
 in
 rec {
+  # Do not require nested KVM on hosted ARM workers. The NixOS test
+  # driver and VM defaults support TCG with the same test assertions.
+  vmTestFeatures.kvm = pkgs.stdenv.hostPlatform.system != "aarch64-linux";
+
   s3AccessKey = "rustfsadmin";
   s3SecretKey = "rustfsadmin";
 

@@ -25,7 +25,8 @@ let
     '';
   };
 in
-testers.nixosTest {
+testers.runNixOSTest {
+  requiredFeatures = common.vmTestFeatures;
   name = "nixos-test-external-signer";
 
   nodes.server = {

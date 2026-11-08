@@ -21,7 +21,8 @@ let
     ;
   serverUrl = "http://server:5751";
 in
-testers.nixosTest {
+testers.runNixOSTest {
+  requiredFeatures = common.vmTestFeatures;
   name = "nixos-test-niks3";
 
   nodes = {

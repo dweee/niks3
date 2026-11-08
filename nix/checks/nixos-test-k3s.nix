@@ -24,7 +24,8 @@ let
   hostIP = "192.168.1.1";
   nodePort = 30051;
 in
-testers.nixosTest {
+testers.runNixOSTest {
+  requiredFeatures = common.vmTestFeatures;
   name = "nixos-test-k3s";
 
   nodes.machine =

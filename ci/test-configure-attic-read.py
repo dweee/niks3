@@ -151,7 +151,7 @@ class PrivateReadTests(unittest.TestCase):
             cleanup = build.index("--cleanup")
             self.assertLess(cleanup, build.index("ci/transfer-attic.py export"))
             self.assertIn("if: ${{ always() }}", build[build.rindex("    - name:", 0, cleanup):cleanup])
-            self.assertIn('nix build "$target"', build)
+            self.assertIn('nix build "$target^*"', build)
 
     def test_netrc_is_private_and_token_does_not_enter_nix_config(self):
         with tempfile.TemporaryDirectory() as tmp:

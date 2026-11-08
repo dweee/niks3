@@ -9,7 +9,8 @@
 let
   inherit (common) apiToken;
 in
-testers.nixosTest {
+testers.runNixOSTest {
+  requiredFeatures = common.vmTestFeatures;
   name = "nixos-test-read-proxy";
 
   nodes.server = {
