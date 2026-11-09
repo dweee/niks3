@@ -18,3 +18,11 @@ container manifest contents. Precompiled Go test binaries must be executable;
 safe test lists are read, while the server binary is not run because its
 TestMain starts PostgreSQL and RustFS even for a test-list request. These checks
 do not substitute for the separate Go integration tests or signed cold reuse.
+
+Hosted ARM Linux builds use one compiler core and at least 16 GiB of swap. Four
+native check jobs previously lost RustFS compiler processes during thin LTO; no
+Niks3 test assertion ran in those failures. CI keeps the pinned RustFS recipe
+and every native target, reserves swap only on disposable ARM runners after SDK
+cleanup, and fails explicitly if the reservation lacks disk space. Other native
+platforms retain their compiler settings. This does not broaden private-cache
+access for pull requests.
