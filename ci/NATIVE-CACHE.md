@@ -26,3 +26,10 @@ and every native target, reserves swap only on disposable ARM runners after SDK
 cleanup, and fails explicitly if the reservation lacks disk space. Other native
 platforms retain their compiler settings. This does not broaden private-cache
 access for pull requests.
+
+The external-signer VM gives its OpenBao key-import setup a five-minute client
+deadline and a ten-minute service bound for the initial RSA wrapping key under
+ARM emulation. Runtime signer and server timeouts are unchanged. Failed external
+signer startup prints bounded fixture journals; failed K3s rollout prints bounded
+pod status, events and current/previous container logs. K3s readiness assertions
+and their existing timeout remain unchanged while diagnosing the ARM crash loop.

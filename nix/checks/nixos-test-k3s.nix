@@ -141,7 +141,23 @@ testers.runNixOSTest {
     machine.wait_for_unit("postgresql.service")
 
     with subtest("chart deploys and becomes ready"):
-      machine.wait_until_succeeds("kubectl -n niks3 rollout status deployment niks3 --timeout=10s", timeout=300)
+      try:
+        machine.wait_until_succeeds("kubectl -n niks3 rollout status deployment niks3 --timeout=10s", timeout=300)
+      except Exception:
+        # Keep the readiness assertion; capture the actual crash-loop cause.
+        # These fixtures contain only the public, fixed test credentials.
+        for command in [
+          "kubectl get pods -A -o wide",
+          "kubectl -n niks3 describe pods",
+          "kubectl -n niks3 logs deployment/niks3 --all-containers=true --tail=120",
+          "kubectl -n niks3 logs deployment/niks3 --all-containers=true --previous --tail=120",
+          "kubectl -n niks3 get events --sort-by=.lastTimestamp",
+        ]:
+          try:
+            print(machine.execute("timeout 30 " + command)[1])
+          except Exception as error:
+            print(f"Fixture diagnostics unavailable: {type(error).__name__}")
+        raise
       machine.succeed("kubectl -n niks3 get deployment niks3 -o jsonpath='{.metadata.annotations.reloader\\.stakater\\.com/auto}' | grep true")
       machine.wait_until_succeeds("curl -sf http://localhost:${toString nodePort}/readyz | grep OK", timeout=60)
 

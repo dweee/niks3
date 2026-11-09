@@ -69,6 +69,9 @@ testers.runNixOSTest {
       environment = {
         BAO_ADDR = baoAddr;
         BAO_TOKEN = "root";
+        # The first transit import generates an RSA wrapping key. ARM TCG can
+        # exceed the CLI's default 60-second request deadline during setup.
+        BAO_CLIENT_TIMEOUT = "5m";
       };
       path = [
         openbao
@@ -88,6 +91,7 @@ testers.runNixOSTest {
         Type = "oneshot";
         RemainAfterExit = true;
         RuntimeDirectory = "openbao-signer-setup";
+        TimeoutStartSec = "10min";
       };
     };
 
@@ -103,7 +107,14 @@ testers.runNixOSTest {
   };
 
   testScript = ''
-    server.wait_for_unit("niks3.service")
+    try:
+        server.wait_for_unit("niks3.service")
+    except Exception:
+        try:
+            print(server.execute("timeout 30 journalctl -b -u openbao-dev -u openbao-setup -u niks3 --no-pager -n 120")[1])
+        except Exception as error:
+            print(f"Fixture diagnostics unavailable: {type(error).__name__}")
+        raise
     server.wait_for_open_port(5751)
 
     server.succeed("echo -n '${apiToken}' > /tmp/auth-token")
