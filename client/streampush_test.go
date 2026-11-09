@@ -427,12 +427,17 @@ func TestStreamPushStopsWhenCanceled(t *testing.T) {
 	cancel()
 
 	in, _ := io.Pipe()
+	t.Cleanup(func() { _ = in.Close() })
+
 	done := make(chan error, 1)
 
 	go func() { done <- client.NewStreamPusher(nil, 1, 1).Run(ctx, in, io.Discard) }()
 
 	select {
-	case <-done:
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v, expected cancellation", err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run still waits for input")
 	}

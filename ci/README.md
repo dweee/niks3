@@ -39,3 +39,12 @@ Linux integration tests run on both architectures: x86 uses KVM, while ARM uses
 the supported QEMU TCG fallback with the same test assertions. The existing
 bounded build/export/publisher path retains completed dependencies on failure;
 a failed required check still fails the native result.
+
+The development shell uses AWS CLI v2. The v1 recipe can reject a consuming
+nixpkgs selection whose botocore/s3transfer versions differ; dependency checks
+remain enabled. Unit-service fixtures own their database pools through test
+cleanup and give database setup and serialized bucket creation separate budgets.
+Each compiled Go test binary has a timeout of 20 minutes; proxy request/deadline
+assertions remain unchanged. Narrow lint annotations keep intentional channel
+error draining and sequential `t.Chdir` tests valid with both supported linter
+versions, without disabling those linters globally.

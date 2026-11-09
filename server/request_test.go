@@ -49,19 +49,24 @@ func createTestService(tb testing.TB) *server.Service {
 
 	connectionString := createTestDatabase(tb)
 
-	ctx, cancel := context.WithTimeout(tb.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(tb.Context(), time.Minute)
 	defer cancel()
 
 	pool, err := pg.Connect(ctx, connectionString)
 	if err != nil {
 		ok(tb, err)
 	}
+	tb.Cleanup(pool.Close)
+
 	// create bucket for test
 	bucketName := "bucket" + strconv.Itoa(int(testBucketCount.Add(1)))
 	minioClient := testRustfsServer.Client(tb)
 
 	testBucketMu.Lock()
-	err = minioClient.MakeBucket(ctx, bucketName, minio.MakeBucketOptions{})
+	// Migration and waiting for another bucket must not consume the S3 deadline.
+	bucketCtx, cancelBucket := context.WithTimeout(tb.Context(), time.Minute)
+	err = minioClient.MakeBucket(bucketCtx, bucketName, minio.MakeBucketOptions{})
+	cancelBucket()
 	testBucketMu.Unlock()
 	ok(tb, err)
 
@@ -74,6 +79,24 @@ func createTestService(tb testing.TB) *server.Service {
 		S3RateLimiter: ratelimit.NewAdaptiveRateLimiter(0, "s3-test"), // Start unlimited for tests
 		GCTasks:       server.NewGCTaskStore(),
 		Metrics:       server.NewMetrics(),
+	}
+}
+
+func TestCreateTestServiceClosesPool(t *testing.T) {
+	t.Parallel()
+
+	var service *server.Service
+
+	// Registered first so the fixture's cleanup runs before this assertion.
+	t.Cleanup(func() {
+		if service != nil && service.Pool.Stat().TotalConns() != 0 {
+			t.Error("fixture left database connections open")
+		}
+	})
+
+	service = createTestService(t)
+	if service.Pool.Stat().TotalConns() == 0 {
+		t.Fatal("fixture did not establish a database connection")
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 	"github.com/Mic92/niks3/server/oidc"
 )
 
-//nolint:paralleltest // t.Chdir is incompatible with t.Parallel
+//nolint:paralleltest,nolintlint // t.Chdir requires sequential tests; linter versions differ.
 func TestProxyHeadersOnlyTrustedOnSocket(t *testing.T) {
 	service := createTestService(t)
 	defer service.Close()

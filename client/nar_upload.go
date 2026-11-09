@@ -144,7 +144,9 @@ func (c *Client) compressAndMultipartUploadNAR(ctx context.Context, storePath st
 	if err != nil {
 		_ = pw.CloseWithError(err)
 
-		<-errChan // drain to prevent goroutine leak
+		// Keep the upload error below; this receive only joins the compressor.
+		//nolint:errcheck,nolintlint // Linter versions disagree about intentional error-channel drains.
+		<-errChan
 
 		return err
 	}
