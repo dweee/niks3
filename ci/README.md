@@ -29,3 +29,22 @@ The Dependabot vendor-hash job runs on a PR, so it receives no private cache
 reader or publisher. Its Go/shell tools now resolve from the repository’s locked
 nixpkgs input. Intentional fixed-output hash mismatches are not valid store
 outputs; corrected hashes are subsequently built and retained by native CI.
+
+Every separately exported native check and development shell is included by the
+matrix planner. `package-*` checks are exact package aliases and share their
+package job; `devShell-*` checks cover the corresponding shell. Unknown package
+or platform declarations fail planning. Builds request every named output and
+artifact names include the output set, so a check cannot overwrite a package.
+Linux integration tests run on both architectures: x86 uses KVM, while ARM uses
+the supported QEMU TCG fallback with the same test assertions. The existing
+bounded build/export/publisher path retains completed dependencies on failure;
+a failed required check still fails the native result.
+
+The development shell uses AWS CLI v2. The v1 recipe can reject a consuming
+nixpkgs selection whose botocore/s3transfer versions differ; dependency checks
+remain enabled. Unit-service fixtures own their database pools through test
+cleanup and give database setup and serialized bucket creation separate budgets.
+Each compiled Go test binary has a timeout of 20 minutes; proxy request/deadline
+assertions remain unchanged. Narrow lint annotations keep intentional channel
+error draining and sequential `t.Chdir` tests valid with both supported linter
+versions, without disabling those linters globally.

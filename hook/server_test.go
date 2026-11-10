@@ -18,7 +18,7 @@ import (
 // TestServerClientIntegration tests the full server+client flow: multiple
 // concurrent clients send paths, the server queues them, and acks each client.
 //
-//nolint:paralleltest // t.Chdir is incompatible with t.Parallel
+//nolint:paralleltest,nolintlint // t.Chdir requires sequential tests; linter versions differ.
 func TestServerClientIntegration(t *testing.T) {
 	// macOS limits a socket path to 103 bytes, which the sandbox's temp dir exceeds.
 	t.Chdir(t.TempDir())
@@ -101,7 +101,7 @@ func TestServerClientIntegration(t *testing.T) {
 
 // TestServerQueueError verifies that queue errors are propagated back to the client.
 //
-//nolint:paralleltest // t.Chdir is incompatible with t.Parallel
+//nolint:paralleltest,nolintlint // t.Chdir requires sequential tests; linter versions differ.
 func TestServerQueueError(t *testing.T) {
 	// macOS limits a socket path to 103 bytes, which the sandbox's temp dir exceeds.
 	t.Chdir(t.TempDir())

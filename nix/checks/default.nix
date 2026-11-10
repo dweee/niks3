@@ -67,22 +67,22 @@ packages
         export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
 
         echo "Running client tests..."
-        niks3-client.test -test.v
+        niks3-client.test -test.v -test.timeout=20m
 
         echo "Running server tests..."
-        niks3-server.test -test.v
+        niks3-server.test -test.v -test.timeout=20m
 
         echo "Running OIDC tests..."
-        niks3-server-oidc.test -test.v
+        niks3-server-oidc.test -test.v -test.timeout=20m
 
         echo "Running hook tests..."
-        niks3-hook.test -test.v
+        niks3-hook.test -test.v -test.timeout=20m
 
         echo "Running signing tests..."
-        niks3-server-signing.test -test.v
+        niks3-server-signing.test -test.v -test.timeout=20m
 
         echo "Running OpenBao signer tests..."
-        niks3-openbao-signer.test -test.v
+        niks3-openbao-signer.test -test.v -test.timeout=20m
 
         touch $out
       '';

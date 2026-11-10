@@ -15,7 +15,7 @@ nix develop
 Or use [direnv](https://direnv.net/) (`direnv allow`) to load it automatically.
 
 The shell provides Go tooling, PostgreSQL, RustFS (S3-compatible storage),
-goose, sqlc, s5cmd and awscli.
+goose, sqlc, s5cmd and AWS CLI v2 (`aws`).
 
 ### Development Workflow
 
