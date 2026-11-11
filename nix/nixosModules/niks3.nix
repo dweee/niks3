@@ -783,12 +783,20 @@ in
         "niks3.socket"
       ]
       ++ lib.optional cfg.nginx.mtls.enable "niks3-proxy.socket"
-      ++ lib.optional cfg.database.createLocally "postgresql.service";
+      ++ lib.optionals cfg.database.createLocally (
+        [ "postgresql.service" ]
+        # Newer nixpkgs creates roles/databases in a separate oneshot.
+        ++ lib.optional (config.systemd.services ? postgresql-setup) "postgresql-setup.service"
+      );
       requires = [
         "niks3.socket"
       ]
       ++ lib.optional cfg.nginx.mtls.enable "niks3-proxy.socket"
-      ++ lib.optional cfg.database.createLocally "postgresql.service";
+      ++ lib.optionals cfg.database.createLocally (
+        [ "postgresql.service" ]
+        # Newer nixpkgs creates roles/databases in a separate oneshot.
+        ++ lib.optional (config.systemd.services ? postgresql-setup) "postgresql-setup.service"
+      );
 
       # The default stops niks3.socket along with the service on a switch, so
       # clients get refused until the new generation starts it again.
