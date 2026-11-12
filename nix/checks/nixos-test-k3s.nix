@@ -23,6 +23,11 @@ let
   inherit (common) apiToken;
   hostIP = "192.168.1.1";
   nodePort = 30051;
+  # Hosted ARM can fall back to TCG. The unchanged fixture already needed
+  # nearly the entire 300-second readiness budget in a successful TCG run;
+  # modest emulation slowdown then expired before the pod could start.
+  # Keep the readiness/authentication assertions and x86 KVM budget intact.
+  chartReadinessTimeout = if stdenv.hostPlatform.system == "aarch64-linux" then 600 else 300;
 in
 testers.runNixOSTest {
   requiredFeatures = common.vmTestFeatures;
@@ -150,7 +155,7 @@ testers.runNixOSTest {
 
     with subtest("chart deploys and becomes ready"):
       try:
-        machine.wait_until_succeeds("kubectl -n niks3 rollout status deployment niks3 --timeout=10s", timeout=300)
+        machine.wait_until_succeeds("kubectl -n niks3 rollout status deployment niks3 --timeout=10s", timeout=${toString chartReadinessTimeout})
       except Exception:
         # Keep the readiness assertion; capture the actual crash-loop cause.
         # These fixtures contain only the public, fixed test credentials.
