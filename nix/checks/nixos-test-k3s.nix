@@ -69,6 +69,13 @@ testers.runNixOSTest {
         enable = true;
         role = "server";
         package = k3s;
+        # The fixture's database/S3 endpoints and pg_hba rule are IPv4.
+        # Do not let k3s auto-select the harness's IPv6 address/CIDRs.
+        nodeIP = hostIP;
+        extraFlags = [
+          "--cluster-cidr=10.42.0.0/16"
+          "--service-cidr=10.43.0.0/16"
+        ];
         disable = [
           "traefik"
           "metrics-server"
@@ -139,6 +146,7 @@ testers.runNixOSTest {
     machine.wait_for_unit("k3s.service")
     machine.wait_for_unit("rustfs-setup.service")
     machine.wait_for_unit("postgresql.service")
+    machine.wait_for_unit("postgresql-setup.service")
 
     with subtest("chart deploys and becomes ready"):
       try:
