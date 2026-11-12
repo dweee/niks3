@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestQueueOwnerRejectsCanonicalAndSymlinkAliases(t *testing.T) {
@@ -156,7 +158,7 @@ func TestQueueOwnerRegistrationChildKeepsLock(t *testing.T) {
 	// /dev/null. This leaves the Go File object untouched while os/exec uses it,
 	// and prevents cleanup from closing an unrelated, reused descriptor. The
 	// child must now be the sole holder of the queue lock's open description.
-	if err := syscall.Dup2(int(null.Fd()), ownerFD); err != nil {
+	if err := unix.Dup2(int(null.Fd()), ownerFD); err != nil {
 		t.Fatal(err)
 	}
 	second, err := OpenQueue(db)
