@@ -4,6 +4,7 @@ package hook
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"time"
@@ -168,35 +169,44 @@ func (w *Worker) step(ctx context.Context) ([]string, bool) {
 		return nil, true
 	}
 
-	var existing, gced []string
-	// A dangling symlink can itself be a valid Nix output; check the store
-	// object, not whether its target currently exists on this machine.
+	var existing, gced, unreadable []string
+
+	// A dangling symlink can itself be a valid store output. Rooted queues
+	// retain their injectable store check for crash-recovery regression tests.
 	stat := os.Lstat
 	if w.queue.roots != nil {
 		stat = w.queue.roots.stat
 	}
-
 	for _, p := range paths {
-		if _, err := stat(p); errors.Is(err, os.ErrNotExist) {
+		_, err := stat(p)
+
+		switch {
+		case err == nil:
+			existing = append(existing, p)
+		case errors.Is(err, fs.ErrNotExist):
 			slog.Warn("Store path no longer exists (garbage collected?), removing from queue", "path", p)
 
 			gced = append(gced, p)
-		} else if err != nil {
-			// Failure to inspect a retained path does not prove it is invalid.
-			// Preserve its queue entry and root for a later retry.
-			slog.Error("Cannot inspect pending store path, retaining it", "path", p, "error", err)
-		} else {
-			existing = append(existing, p)
+		default:
+			// Not proof the path is gone, so keep it queued.
+			slog.Warn("Cannot stat store path, will retry later", "path", p, "error", err)
+
+			unreadable = append(unreadable, p)
 		}
 	}
 
-	w.remove(gced)
-
-	if len(existing) == 0 {
-		return paths, len(gced) > 0
+	if len(unreadable) > 0 {
+		w.retry(unreadable)
 	}
 
-	return paths, w.upload(ctx, existing)
+	// A failed removal is not progress, or the drain never gives up.
+	progress := len(gced) > 0 && w.remove(gced)
+
+	if len(existing) > 0 {
+		progress = w.upload(ctx, existing) || progress
+	}
+
+	return paths, progress
 }
 
 // upload pushes a batch; uploaded paths (and their closure) are removed from
@@ -209,9 +219,9 @@ func (w *Worker) upload(ctx context.Context, batch []string) bool {
 
 	uploaded, err := w.push(ctx, batch)
 	if err == nil {
-		w.settle(batch, uploaded)
+		_, settled := w.settle(batch, uploaded)
 
-		return true
+		return settled
 	}
 
 	slog.Error("Upload failed", "error", err, "count", len(batch))
@@ -251,7 +261,12 @@ func (w *Worker) upload(ctx context.Context, batch []string) bool {
 			continue
 		}
 
-		for _, r := range w.settle([]string{p}, uploaded) {
+		settled, ok := w.settle([]string{p}, uploaded)
+		if !ok {
+			continue
+		}
+
+		for _, r := range settled {
 			done[r] = struct{}{}
 		}
 	}
@@ -260,23 +275,27 @@ func (w *Worker) upload(ctx context.Context, batch []string) bool {
 }
 
 // settle removes an uploaded batch and its closure from the queue and returns
-// what was removed. Removing the whole closure prunes dependencies that were
-// queued separately but went up as part of a parent.
-func (w *Worker) settle(batch, uploaded []string) []string {
+// what was removed and whether the removal succeeded. Removing the whole
+// closure prunes dependencies that were queued separately but went up as
+// part of a parent.
+func (w *Worker) settle(batch, uploaded []string) ([]string, bool) {
 	toRemove := batch
 	if len(uploaded) > len(batch) {
 		toRemove = uploaded
 	}
 
-	w.remove(toRemove)
-
-	return toRemove
+	return toRemove, w.remove(toRemove)
 }
 
-func (w *Worker) remove(paths []string) {
+// remove deletes paths from the queue and reports whether it succeeded.
+func (w *Worker) remove(paths []string) bool {
 	if err := w.queue.Remove(paths); err != nil {
 		slog.Error("Failed to remove paths from queue", "error", err, "count", len(paths))
+
+		return false
 	}
+
+	return true
 }
 
 func (w *Worker) retry(paths []string) {

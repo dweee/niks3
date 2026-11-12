@@ -3,11 +3,13 @@ package hook
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	// Pure-Go SQLite driver (no CGO required).
 	_ "modernc.org/sqlite"
@@ -15,19 +17,54 @@ import (
 
 // Queue wraps a SQLite database for persisting store paths that need uploading.
 type Queue struct {
-	db *sql.DB
-	// Root operations and queue transactions must have the same ordering.
-	// Otherwise a completed upload could unlink a newly enqueued path's root.
+	db    *sql.DB
 	mu    sync.Mutex
+	owner *os.File
+	path  string
 	roots *gcRoots
 }
 
 // OpenQueue opens (or creates) the SQLite database at dbPath.
-// Parent directories are created automatically.
+// Parent directories are created automatically. Only one owner may open a queue.
 func OpenQueue(dbPath string) (*Queue, error) {
+	return openQueue(dbPath)
+}
+
+func openQueue(dbPath string) (*Queue, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
+
+	dbPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving queue path: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(dbPath); err == nil {
+		dbPath = resolved
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("resolving queue path: %w", err)
+	} else {
+		parent, err := filepath.EvalSymlinks(filepath.Dir(dbPath))
+		if err != nil {
+			return nil, fmt.Errorf("resolving queue directory: %w", err)
+		}
+		dbPath = filepath.Join(parent, filepath.Base(dbPath))
+	}
+	owner, err := os.OpenFile(dbPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening queue owner lock: %w", err)
+	}
+	if err := syscall.Flock(int(owner.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = owner.Close()
+
+		return nil, fmt.Errorf("queue already owned: %w", err)
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = owner.Close()
+		}
+	}()
 
 	// Pragmas go in the DSN so they apply to every pooled connection; a one-off
 	// ExecContext only configures the single connection serving that call,
@@ -38,6 +75,10 @@ func OpenQueue(dbPath string) (*Queue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
+
+	// Writers wait for the one connection in turn. With a pool SQLite polls
+	// for the lock, and a writer that keeps losing fails with SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
 
 	ctx := context.Background()
 
@@ -53,13 +94,19 @@ func OpenQueue(dbPath string) (*Queue, error) {
 		return nil, fmt.Errorf("creating table: %w", err)
 	}
 
-	return &Queue{db: db}, nil
+	q := &Queue{db: db, owner: owner, path: dbPath}
+	success = true
+
+	return q, nil
 }
 
 // Enqueue inserts store paths into the queue, silently ignoring duplicates.
 func (q *Queue) Enqueue(paths []string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.owner == nil {
+		return errors.New("queue is closed")
+	}
 
 	if q.roots != nil {
 		for _, p := range paths {
@@ -184,6 +231,11 @@ func (q *Queue) Count() (int, error) {
 
 // Close closes the underlying database connection.
 func (q *Queue) Close() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.owner != nil {
+		defer func() { _ = q.owner.Close(); q.owner = nil }()
+	}
 	if err := q.db.Close(); err != nil {
 		return fmt.Errorf("closing database: %w", err)
 	}

@@ -236,7 +236,8 @@ SELECT
     (CASE
         WHEN o.first_deleted_at IS NULL THEN NULL
         ELSE ct.now - o.first_deleted_at
-    END)::interval AS deleted_at
+    END)::interval AS deleted_at,
+    o.refs AS refs
 FROM objects AS o, ct
 WHERE key = any($1::varchar [])
 FOR KEY SHARE OF o
@@ -245,6 +246,7 @@ FOR KEY SHARE OF o
 type GetExistingObjectsRow struct {
 	Key       string          `json:"key"`
 	DeletedAt pgtype.Interval `json:"deleted_at"`
+	Refs      []string        `json:"refs"`
 }
 
 // Waits for a sweep holding a row, so the push's upload cannot land before the
@@ -258,7 +260,7 @@ func (q *Queries) GetExistingObjects(ctx context.Context, dollar_1 []string) ([]
 	var items []GetExistingObjectsRow
 	for rows.Next() {
 		var i GetExistingObjectsRow
-		if err := rows.Scan(&i.Key, &i.DeletedAt); err != nil {
+		if err := rows.Scan(&i.Key, &i.DeletedAt, &i.Refs); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -469,39 +471,6 @@ func (q *Queries) GetPresentObjects(ctx context.Context, dollar_1 []string) ([]s
 			return nil, err
 		}
 		items = append(items, key)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const getRedundantMultipartUploads = `-- name: GetRedundantMultipartUploads :many
-SELECT upload_id
-FROM multipart_uploads
-WHERE object_key = $1 AND upload_id <> $2
-`
-
-type GetRedundantMultipartUploadsParams struct {
-	ObjectKey string `json:"object_key"`
-	UploadID  string `json:"upload_id"`
-}
-
-// Upload IDs other pending_closures opened for object_key, used to abort
-// duplicates once one upload of the NAR completes.
-func (q *Queries) GetRedundantMultipartUploads(ctx context.Context, arg GetRedundantMultipartUploadsParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, getRedundantMultipartUploads, arg.ObjectKey, arg.UploadID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var upload_id string
-		if err := rows.Scan(&upload_id); err != nil {
-			return nil, err
-		}
-		items = append(items, upload_id)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

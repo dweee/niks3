@@ -249,6 +249,7 @@ func TestDatabaseEnqueueFailureKeepsRootForRestartRecovery(t *testing.T) {
 		t.Fatal("enqueue to closed database succeeded")
 	}
 	requireRoot(t, f, output, true)
+	_ = q.Close()
 	reopened := f.open(t)
 	requireQueueCount(t, reopened, 1)
 }
