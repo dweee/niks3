@@ -127,10 +127,14 @@ in
       after = [ "network.target" ];
       requires = [ "niks3-auto-upload.socket" ];
       path = [ config.nix.package ];
-      # Root registration must run through the daemon: ProtectSystem keeps the
-      # worker's /nix/var/nix read-only while the daemon owns gcroots/auto.
-      environment.NIX_REMOTE = "daemon";
-      environment.NIX_CONFIG = "store = daemon";
+      environment = {
+        # DynamicUser has HOME=/, which nix cannot write its eval cache to.
+        XDG_CACHE_HOME = "%C/niks3-hook";
+        # GC roots are registered through nix-daemon because ProtectSystem
+        # keeps /nix/var read-only.
+        NIX_REMOTE = "daemon";
+        NIX_CONFIG = "store = daemon";
+      };
 
       serviceConfig = {
         Type = "simple";
@@ -145,7 +149,7 @@ in
               "--server-url"
               (lib.escapeShellArg cfg.serverUrl)
               "--auth-token-path"
-              (lib.escapeShellArg cfg.authTokenFile)
+              "%d/auth-token"
               "--socket"
               (lib.escapeShellArg cfg.socketPath)
               "--batch-size"
@@ -161,18 +165,32 @@ in
             ++ lib.optional cfg.debug "--debug"
             ++ lib.optionals cfg.mtls.enable [
               "--client-cert"
-              (lib.escapeShellArg cfg.mtls.clientCert)
+              "%d/client-cert"
               "--client-key"
-              (lib.escapeShellArg cfg.mtls.clientKey)
+              "%d/client-key"
             ]
             ++ lib.optionals (cfg.mtls.enable && cfg.mtls.caCert != null) [
               "--ca-cert"
-              (lib.escapeShellArg cfg.mtls.caCert)
+              "%d/ca-cert"
             ]
           );
         Restart = "on-failure";
         RestartSec = "5s";
+        # Uploading only needs world-readable store paths and build logs plus
+        # nix-daemon access, so there is no reason to hold root.
+        DynamicUser = true;
         StateDirectory = "niks3-hook";
+        CacheDirectory = "niks3-hook";
+        # Secrets are typically root-only (sops-nix, agenix). systemd hands
+        # the dynamic user a private copy.
+        LoadCredential = [
+          "auth-token:${cfg.authTokenFile}"
+        ]
+        ++ lib.optionals cfg.mtls.enable [
+          "client-cert:${cfg.mtls.clientCert}"
+          "client-key:${cfg.mtls.clientKey}"
+        ]
+        ++ lib.optional (cfg.mtls.enable && cfg.mtls.caCert != null) "ca-cert:${cfg.mtls.caCert}";
 
         # Hardening
         NoNewPrivileges = true;
@@ -196,7 +214,6 @@ in
         SystemCallFilter = [
           "@system-service"
           "~@privileged"
-          "@chown"
         ];
         SystemCallArchitectures = "native";
       };

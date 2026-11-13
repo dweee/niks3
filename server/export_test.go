@@ -127,12 +127,17 @@ func (s *Service) SetTestHookAfterSweepSelect(f func()) {
 	s.testHookAfterSweepSelect = f
 }
 
-// SetTestHookBeforeRedundantAbort runs f before peers' uploads are aborted.
-func (s *Service) SetTestHookBeforeRedundantAbort(f func()) {
-	s.testHookBeforeRedundantAbort = f
-}
-
 // SetTestHookBeforeProxyGet runs f between the read proxy's Stat and GET.
 func (s *Service) SetTestHookBeforeProxyGet(f func()) {
 	s.testHookBeforeProxyGet = f
+}
+
+// AbortSucceeded exposes abortSucceeded for tests.
+func AbortSucceeded(err error) bool {
+	return abortSucceeded(err)
+}
+
+// EnsureAbortUploadsRule exposes ensureAbortUploadsRule for tests.
+func (s *Service) EnsureAbortUploadsRule(ctx context.Context) {
+	s.ensureAbortUploadsRule(ctx)
 }

@@ -60,78 +60,6 @@ func formatBytes(bytes uint64) string {
 	return fmt.Sprintf("%.1f%cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-// uploadBufferPool pools default-sized part buffers to reduce allocations.
-// Larger NARs get a one-off buffer (rare, not worth pooling).
-var uploadBufferPool = sync.Pool{ //nolint:gochecknoglobals // sync.Pool should be global
-	New: func() any {
-		buf := make([]byte, multipartPartSize)
-
-		return &buf
-	},
-}
-
-func getPartBuffer(partSize int) ([]byte, func()) {
-	if partSize > multipartPartSize {
-		return make([]byte, partSize), func() {}
-	}
-
-	ptr, ok := uploadBufferPool.Get().(*[]byte)
-	if !ok {
-		return make([]byte, multipartPartSize), func() {}
-	}
-
-	return *ptr, func() { uploadBufferPool.Put(ptr) }
-}
-
-// ErrUploadSuperseded means a concurrent closure already finished the same NAR
-// and our upload was aborted server-side. The blob exists, so callers skip it.
-var ErrUploadSuperseded = errors.New("multipart upload superseded by a concurrent upload")
-
-// supersededByPeer reports whether a 404 from the upload means the NAR is
-// already present. A 404 is ambiguous (peer abort vs expired upload), so we
-// confirm the object exists in S3 before skipping to avoid losing data.
-func (c *Client) supersededByPeer(ctx context.Context, objectKey string, err error) bool {
-	var statusErr *HTTPStatusError
-	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
-		return false
-	}
-
-	exists, existsErr := c.ObjectExists(ctx, objectKey)
-	if existsErr != nil {
-		slog.Warn("Failed to confirm object after upload 404", "object_key", objectKey, "error", existsErr)
-
-		return false
-	}
-
-	return exists
-}
-
-// ObjectExists reports whether objectKey is already present in S3.
-func (c *Client) ObjectExists(ctx context.Context, objectKey string) (bool, error) {
-	reqURL := c.baseURL.JoinPath("api/objects", objectKey)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, reqURL.String(), nil)
-	if err != nil {
-		return false, fmt.Errorf("creating request: %w", err)
-	}
-
-	resp, err := c.DoServerRequest(ctx, req)
-	if err != nil {
-		return false, fmt.Errorf("sending request: %w", err)
-	}
-
-	defer deferCloseBody(resp)
-
-	switch resp.StatusCode {
-	case http.StatusNoContent:
-		return true, nil
-	case http.StatusNotFound:
-		return false, nil
-	default:
-		return false, &HTTPStatusError{StatusCode: resp.StatusCode}
-	}
-}
-
 // MultipartUploadInfo contains multipart upload information.
 type MultipartUploadInfo struct {
 	UploadID string   `json:"upload_id"`
@@ -252,11 +180,10 @@ func (c *Client) uploadMultipart(ctx context.Context, r io.Reader, multipartInfo
 				return nil
 			}
 
-			buffer, release := getPartBuffer(partSize)
+			buffer := make([]byte, partSize)
 
 			n, err := io.ReadFull(r, buffer)
 			if n == 0 {
-				release()
 				<-slots
 
 				if errors.Is(err, io.EOF) {
@@ -268,7 +195,6 @@ func (c *Client) uploadMultipart(ctx context.Context, r io.Reader, multipartInfo
 
 			last := errors.Is(err, io.ErrUnexpectedEOF)
 			if err != nil && !last {
-				release()
 				<-slots
 
 				return fmt.Errorf("reading part %d: %w", partNumber, err)
@@ -277,7 +203,7 @@ func (c *Client) uploadMultipart(ctx context.Context, r io.Reader, multipartInfo
 			partURL, partData := partURLs[partNumber-1], buffer[:n]
 
 			g.Go(func() error {
-				defer func() { release(); <-slots }()
+				defer func() { <-slots }()
 
 				etag, err := c.uploadPart(gctx, partURL, partData)
 				if err != nil {
@@ -299,10 +225,6 @@ func (c *Client) uploadMultipart(ctx context.Context, r io.Reader, multipartInfo
 	}()
 
 	if err := g.Wait(); err != nil {
-		if c.supersededByPeer(ctx, objectKey, err) {
-			return ErrUploadSuperseded
-		}
-
 		return err //nolint:wrapcheck // wrapped with its part number above
 	}
 
@@ -315,10 +237,6 @@ func (c *Client) uploadMultipart(ctx context.Context, r io.Reader, multipartInfo
 	// Complete the multipart upload
 	err := c.CompleteMultipartUpload(ctx, objectKey, multipartInfo.UploadID, completedParts)
 	if err != nil {
-		if c.supersededByPeer(ctx, objectKey, err) {
-			return ErrUploadSuperseded
-		}
-
 		return fmt.Errorf("completing multipart upload: %w", err)
 	}
 

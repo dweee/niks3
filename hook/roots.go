@@ -35,13 +35,7 @@ func validateOutputPath(path string) error {
 // output against Nix GC. Existing queue entries and roots left by an interrupted
 // enqueue/removal are reconciled before the server can acknowledge new work.
 func OpenQueueWithRoots(dbPath string) (*Queue, error) {
-	return openQueueWithRoots(dbPath, func(ctx context.Context, name string, args ...string) error {
-		if err := exec.CommandContext(ctx, name, args...).Run(); err != nil {
-			return fmt.Errorf("registering Nix GC root: %w", err)
-		}
-
-		return nil
-	}, os.Lstat)
+	return openQueueWithRoots(dbPath, nil, os.Lstat)
 }
 
 // Command execution and store existence checks are injectable so tests need no
@@ -55,7 +49,20 @@ func openQueueWithRoots(dbPath string, command func(context.Context, string, ...
 	if err != nil {
 		return nil, err
 	}
-	q.roots = &gcRoots{directory: filepath.Join(filepath.Dir(absolute), "gcroots"), command: command, stat: stat}
+	if command == nil {
+		command = func(ctx context.Context, name string, args ...string) error {
+			cmd := exec.CommandContext(ctx, name, args...)
+			// Keep exclusive queue ownership until Nix finishes registering a
+			// root, even if the hook process exits while that child is running.
+			cmd.ExtraFiles = []*os.File{q.owner}
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("registering Nix GC root: %w", err)
+			}
+
+			return nil
+		}
+	}
+	q.roots = &gcRoots{directory: filepath.Join(filepath.Dir(q.path), "gcroots"), command: command, stat: stat}
 	if err := q.restoreRoots(); err != nil {
 		_ = q.Close()
 

@@ -62,6 +62,7 @@ func createTestService(tb testing.TB) *server.Service {
 	bucketName := "bucket" + strconv.Itoa(int(testBucketCount.Add(1)))
 	minioClient := testRustfsServer.Client(tb)
 
+	// Waiting for the lock must not use up the creation budget.
 	testBucketMu.Lock()
 	// Migration and waiting for another bucket must not consume the S3 deadline.
 	bucketCtx, cancelBucket := context.WithTimeout(tb.Context(), time.Minute)

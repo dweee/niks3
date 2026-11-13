@@ -41,7 +41,8 @@ SELECT
     (CASE
         WHEN o.first_deleted_at IS NULL THEN NULL
         ELSE ct.now - o.first_deleted_at
-    END)::interval AS deleted_at
+    END)::interval AS deleted_at,
+    o.refs AS refs
 FROM objects AS o, ct
 WHERE key = any($1::varchar [])
 FOR KEY SHARE OF o;
@@ -208,13 +209,6 @@ WHERE pc.started_at < sqlc.arg(cutoff)::timestamp;
 -- name: DeleteMultipartUpload :exec
 DELETE FROM multipart_uploads
 WHERE upload_id = $1;
-
--- name: GetRedundantMultipartUploads :many
--- Upload IDs other pending_closures opened for object_key, used to abort
--- duplicates once one upload of the NAR completes.
-SELECT upload_id
-FROM multipart_uploads
-WHERE object_key = $1 AND upload_id <> $2;
 
 -- name: GetMultipartUpload :one
 SELECT pending_closure_id, object_key, upload_id

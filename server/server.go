@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -64,6 +63,10 @@ type options struct {
 
 	// CachePriority is advertised in nix-cache-info. Lower wins.
 	CachePriority int
+
+	// AbortIncompleteUploadsDays installs a bucket lifecycle rule aborting
+	// multipart uploads after this many days. 0 disables it.
+	AbortIncompleteUploadsDays int
 
 	// MTLSProxyHeader, when set, names a header the reverse proxy sets to
 	MTLSProxySocket string
@@ -131,6 +134,9 @@ type Service struct {
 	// CachePriority is written to nix-cache-info. 0 means defaultCachePriority.
 	CachePriority int
 
+	// See options.AbortIncompleteUploadsDays.
+	AbortIncompleteUploadsDays int
+
 	// NativeMTLS is set when the server terminates TLS itself with a
 	// client CA — mtlsCheck reads r.TLS.PeerCertificates directly
 	// instead of trusting proxy headers.
@@ -152,8 +158,6 @@ type Service struct {
 	testHookAfterSweepSelect func()
 	// testHookBeforeProxyGet runs between the proxy's Stat and GET.
 	testHookBeforeProxyGet func()
-	// testHookBeforeRedundantAbort runs before peers' uploads are aborted.
-	testHookBeforeRedundantAbort func()
 }
 
 // Close closes the database connection pool.
@@ -244,23 +248,24 @@ func runServer(opts *options) error {
 	}
 
 	service := &Service{
-		Pool:                  pool,
-		MinioClient:           minioClient,
-		PresignClient:         presignClient,
-		Bucket:                opts.S3Bucket,
-		S3Concurrency:         opts.S3Concurrency,
-		S3RateLimiter:         ratelimit.NewAdaptiveRateLimiter(opts.S3RateLimit, "s3"),
-		APIToken:              opts.APIToken,
-		MTLSProxyHeader:       opts.MTLSProxyHeader,
-		MTLSSubjectHeader:     opts.MTLSSubjectHeader,
-		MTLSBoundSubjects:     opts.MTLSBoundSubjects,
-		MTLSBoundSubjectsRead: opts.MTLSBoundSubjectsRead,
-		CacheURL:              opts.CacheURL,
-		ServerURL:             opts.ServerURL,
-		MaxNarSize:            opts.MaxNarSize,
-		CachePriority:         opts.CachePriority,
-		GCTasks:               NewGCTaskStore(),
-		Metrics:               NewMetrics(),
+		Pool:                       pool,
+		MinioClient:                minioClient,
+		PresignClient:              presignClient,
+		Bucket:                     opts.S3Bucket,
+		S3Concurrency:              opts.S3Concurrency,
+		S3RateLimiter:              ratelimit.NewAdaptiveRateLimiter(opts.S3RateLimit, "s3"),
+		APIToken:                   opts.APIToken,
+		MTLSProxyHeader:            opts.MTLSProxyHeader,
+		MTLSSubjectHeader:          opts.MTLSSubjectHeader,
+		MTLSBoundSubjects:          opts.MTLSBoundSubjects,
+		MTLSBoundSubjectsRead:      opts.MTLSBoundSubjectsRead,
+		CacheURL:                   opts.CacheURL,
+		ServerURL:                  opts.ServerURL,
+		MaxNarSize:                 opts.MaxNarSize,
+		CachePriority:              opts.CachePriority,
+		AbortIncompleteUploadsDays: opts.AbortIncompleteUploadsDays,
+		GCTasks:                    NewGCTaskStore(),
+		Metrics:                    NewMetrics(),
 	}
 
 	// Initialize OIDC validator if configured
@@ -321,6 +326,8 @@ func runServer(opts *options) error {
 	if err := service.InitializeBucket(initCtx); err != nil {
 		return fmt.Errorf("failed to initialize bucket: %w", err)
 	}
+
+	service.ensureAbortUploadsRule(initCtx)
 
 	metricsCtx, stopMetrics := context.WithCancel(context.Background())
 	defer stopMetrics()
@@ -630,9 +637,7 @@ func (s *Service) InitializeBucket(ctx context.Context) error {
 		return fmt.Errorf("uploading nix-cache-info: %w", err)
 	}
 
-	_, err := s.MinioClient.PutObject(ctx, s.Bucket, "nix-cache-info",
-		strings.NewReader(cacheInfo), int64(len(cacheInfo)),
-		minio.PutObjectOptions{ContentType: "text/plain"})
+	err := s.putSmallObject(ctx, "nix-cache-info", []byte(cacheInfo), "text/plain")
 	if err != nil {
 		if isRateLimitError(err) {
 			s.S3RateLimiter.RecordThrottle()
@@ -732,9 +737,7 @@ func (s *Service) uploadLandingPage(ctx context.Context) {
 		return
 	}
 
-	_, err = s.MinioClient.PutObject(ctx, s.Bucket, "index.html",
-		bytes.NewReader([]byte(landingHTML)), int64(len(landingHTML)),
-		minio.PutObjectOptions{ContentType: "text/html; charset=utf-8"})
+	err = s.putSmallObject(ctx, "index.html", []byte(landingHTML), "text/html; charset=utf-8")
 	if err != nil {
 		if isRateLimitError(err) {
 			s.S3RateLimiter.RecordThrottle()
