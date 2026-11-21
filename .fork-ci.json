@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "upstream": "Mic92/niks3",
+  "branch": "main",
+  "track": "branch",
+  "author": {
+    "name": "dave",
+    "email": "git@d.monke.fail"
+  },
+  "required_paths": [
+    "flake.nix",
+    "flake.lock"
+  ],
+  "protected_paths": [
+    "flake.nix",
+    "flake.lock",
+    "nix/**",
+    "ci/**"
+  ],
+  "matrix": [
+    {
+      "system": "x86_64-linux",
+      "packages": [
+        "niks3"
+      ],
+      "checks": [
+        "package-niks3-tests",
+        "version-sync"
+      ],
+      "tests": []
+    }
+  ]
+}

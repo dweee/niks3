@@ -29,7 +29,12 @@ type rootFixture struct {
 
 func newRootFixture(t *testing.T) *rootFixture {
 	t.Helper()
-	directory := t.TempDir()
+	// A macOS temporary directory may contain a symlink, such as /tmp.
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	info, err := os.Stat(directory)
 	if err != nil {
 		t.Fatal(err)
