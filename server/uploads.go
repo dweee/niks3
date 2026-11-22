@@ -8,13 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mic92/niks3/ratelimit"
 	"github.com/Mic92/niks3/server/pg"
 	"github.com/Mic92/niks3/server/signing"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -391,7 +392,7 @@ func (s *Service) CompleteMultipartUploadHandler(w http.ResponseWriter, r *http.
 	// re-offering this NAR and leak an orphaned multipart upload each time.
 	// On error fail the request before dropping the tracking row, so a retry
 	// re-attempts the idempotent registration.
-	if err := s.registerCompletedObject(r.Context(), upload.PendingClosureID, req.ObjectKey); err != nil {
+	if _, err := s.registerCompletedObject(r.Context(), upload.PendingClosureID, req.ObjectKey); err != nil {
 		slog.Error("Failed to register completed object", "error", err, "object_key", req.ObjectKey)
 		http.Error(w, "failed to register completed object", http.StatusInternalServerError)
 
@@ -409,44 +410,29 @@ func (s *Service) CompleteMultipartUploadHandler(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// registerCompletedObject records an uploaded object in the objects table,
-// using refs/size from its pending_objects row in the given closure. A
-// missing row (closure already cleaned up) is not an error; the object is
-// registered with empty refs and unknown size.
-func (s *Service) registerCompletedObject(ctx context.Context, pendingClosureID int64, objectKey string) error {
-	queries := pg.New(s.Pool)
-
-	row, err := queries.GetPendingObject(ctx, pg.GetPendingObjectParams{
-		PendingClosureID: pendingClosureID,
+// registerCompletedObject records an object the push has uploaded. It tells
+// whether the push still had its pending row for it.
+func (s *Service) registerCompletedObject(ctx context.Context, pendingClosureID int64, objectKey string) (bool, error) {
+	rows, err := pg.New(s.Pool).RegisterCompletedObject(ctx, pg.RegisterCompletedObjectParams{
 		Key:              objectKey,
+		PendingClosureID: pendingClosureID,
 	})
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("get pending object %q: %w", objectKey, err)
+	if err != nil {
+		return false, fmt.Errorf("register completed object %q: %w", objectKey, err)
 	}
 
-	if row.Refs == nil {
-		row.Refs = []string{}
-	}
-
-	if err := queries.RegisterCompletedObject(ctx, pg.RegisterCompletedObjectParams{
-		Key:  objectKey,
-		Refs: row.Refs,
-		Size: row.Size,
-	}); err != nil {
-		return fmt.Errorf("register completed object %q: %w", objectKey, err)
-	}
-
-	return nil
+	return rows > 0, nil
 }
 
 type completeUploadRequest struct {
 	ObjectKey string `json:"object_key"`
+	// PushID is the pending closure or push that uploaded the object.
+	PushID string `json:"push_id,omitempty"`
 }
 
 // CompleteUploadHandler handles POST /api/uploads/complete. Clients call it
-// after a successful presigned PUT so the object is recorded even if its
-// closure never commits. The key must belong to a pending object and the
-// object must exist in S3, so clients cannot register arbitrary keys.
+// after a presigned PUT so the object is recorded even if its push never
+// commits. A request without push_id, as older clients send it, records nothing.
 func (s *Service) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	defer closeRequestBody(r)
 
@@ -461,85 +447,35 @@ func (s *Service) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	queries := pg.New(s.Pool)
+	if req.PushID == "" {
+		w.WriteHeader(http.StatusNoContent)
 
-	row, err := queries.GetPendingObjectByKey(r.Context(), req.ObjectKey)
+		return
+	}
+
+	id, err := strconv.ParseInt(req.PushID, 10, 64)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The registration is sent off the upload path and can arrive
-			// after the closure commit already recorded the object.
-			if present, perr := queries.GetPresentObjects(r.Context(), []string{req.ObjectKey}); perr == nil && len(present) == 1 {
-				w.WriteHeader(http.StatusNoContent)
-
-				return
-			}
-
-			http.Error(w, "object is not pending upload", http.StatusNotFound)
-
-			return
-		}
-
-		slog.Error("Failed to look up pending object", "error", err, "object_key", req.ObjectKey)
-		http.Error(w, "failed to look up pending object", http.StatusInternalServerError)
+		http.Error(w, "invalid push_id", http.StatusBadRequest)
 
 		return
 	}
 
-	if row.Refs == nil {
-		row.Refs = []string{}
-	}
-
-	exists, err := s.objectExistsInS3(r.Context(), req.ObjectKey)
+	registered, err := s.registerCompletedObject(r.Context(), id, req.ObjectKey)
 	if err != nil {
-		slog.Error("Failed to stat object", "error", err, "object_key", req.ObjectKey)
-		http.Error(w, "failed to stat object", http.StatusInternalServerError)
-
-		return
-	}
-
-	if !exists {
-		http.Error(w, "object not found in S3", http.StatusNotFound)
-
-		return
-	}
-
-	if err := queries.RegisterCompletedObject(r.Context(), pg.RegisterCompletedObjectParams{
-		Key:  req.ObjectKey,
-		Refs: row.Refs,
-		Size: row.Size,
-	}); err != nil {
 		slog.Error("Failed to register completed object", "error", err, "object_key", req.ObjectKey)
 		http.Error(w, "failed to register completed object", http.StatusInternalServerError)
 
 		return
 	}
 
-	slog.Info("Registered completed upload", "object_key", req.ObjectKey)
-	w.WriteHeader(http.StatusNoContent)
-}
+	// The registration can arrive after the commit recorded the object.
+	if !registered {
+		present, err := pg.New(s.Pool).GetLiveObjects(r.Context(), []string{req.ObjectKey})
+		if err != nil || len(present) == 0 {
+			http.Error(w, "object is not pending upload", http.StatusNotFound)
 
-// ObjectExistsHandler handles HEAD /api/objects/{key...}: 204 if objectKey is
-// in S3, 404 otherwise.
-func (s *Service) ObjectExistsHandler(w http.ResponseWriter, r *http.Request) {
-	objectKey := r.PathValue("key")
-	if objectKey == "" {
-		http.Error(w, "missing object key", http.StatusBadRequest)
-
-		return
-	}
-
-	exists, err := s.objectExistsInS3(r.Context(), objectKey)
-	if err != nil {
-		slog.Error("Failed to stat object", "error", err, "object_key", objectKey)
-		http.Error(w, "failed to stat object", http.StatusInternalServerError)
-
-		return
-	}
-
-	if !exists {
-		w.WriteHeader(http.StatusNotFound)
-
-		return
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -573,10 +509,132 @@ func (s *Service) objectExistsInS3(ctx context.Context, objectKey string) (bool,
 
 type signNarinfosRequest struct {
 	Narinfos map[string]NarinfoMetadata `json:"narinfos"`
+	// Claim is set by clients that publish what Claimed in the answer names.
+	Claim bool `json:"claim,omitempty"`
 }
 
 type signNarinfosResponse struct {
 	Signatures map[string][]string `json:"signatures"`
+	// Claimed holds, for each narinfo another push published a different
+	// build of, that build's narinfo. The client publishes it in place of
+	// its own.
+	Claimed map[string]NarinfoMetadata `json:"claimed,omitempty"`
+	// Published holds, for each narinfo another push committed meanwhile,
+	// the key of its NAR. The client uploads no narinfo for it.
+	Published map[string]string `json:"published,omitempty"`
+}
+
+var errPushNotFound = errors.New("push not found")
+
+// claimNarinfos records the signed narinfos as the builds this cache
+// publishes and returns those that lost to an earlier claim.
+func (s *Service) claimNarinfos(
+	ctx context.Context, pushID int64, narinfos map[string]NarinfoMetadata, signatures map[string][]string,
+) (*narinfoClaim, error) {
+	params := pg.ClaimNarinfosParams{PushID: pushID}
+
+	for key, meta := range narinfos {
+		meta.Signatures = signatures[key]
+
+		encoded, err := json.Marshal(meta)
+		if err != nil {
+			return nil, fmt.Errorf("encoding narinfo %s: %w", key, err)
+		}
+
+		params.Keys = append(params.Keys, key)
+		params.NarKeys = append(params.NarKeys, meta.URL)
+		params.Narinfos = append(params.Narinfos, encoded)
+	}
+
+	// A push that wins every key outright needs no transaction.
+	answer, err := pg.New(s.Pool).ClaimNarinfos(ctx, params)
+	if err == nil {
+		return decodeClaim(answer)
+	}
+
+	var pgError *pgconn.PgError
+	if !errors.As(err, &pgError) || pgError.Code != claimNeedsTransaction {
+		return nil, claimError(err)
+	}
+
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	params.InTransaction = true
+
+	answer, err = pg.New(tx).ClaimNarinfos(ctx, params)
+	if err != nil {
+		return nil, claimError(err)
+	}
+
+	claim, err := decodeClaim(answer)
+	if err != nil {
+		return nil, err
+	}
+
+	// Still holding the claim rows, so nobody publishes under these keys
+	// before the deleted build's narinfos are gone.
+	if err := s.removeNarinfos(ctx, claim.Taken); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return claim, nil
+}
+
+// claimNeedsTransaction is the SQLSTATE claim_narinfos fails with.
+const claimNeedsTransaction = "NK301"
+
+type narinfoClaim struct {
+	Lost      map[string]NarinfoMetadata `json:"lost"`
+	Published map[string]string          `json:"published"`
+	Taken     []string                   `json:"taken"`
+}
+
+func decodeClaim(answer []byte) (*narinfoClaim, error) {
+	claim := &narinfoClaim{}
+	if err := json.Unmarshal(answer, claim); err != nil {
+		return nil, fmt.Errorf("decoding claim: %w", err)
+	}
+
+	return claim, nil
+}
+
+func claimError(err error) error {
+	var pgError *pgconn.PgError
+	if errors.As(err, &pgError) && strings.HasPrefix(pgError.Message, "Push does not exist") {
+		return errPushNotFound
+	}
+
+	return fmt.Errorf("claiming narinfos: %w", err)
+}
+
+func (s *Service) removeNarinfos(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+
+	objects := make(chan minio.ObjectInfo, len(keys))
+	for _, key := range keys {
+		objects <- minio.ObjectInfo{Key: key}
+	}
+
+	close(objects)
+
+	for result := range s.MinioClient.RemoveObjects(ctx, s.Bucket, objects, minio.RemoveObjectsOptions{}) {
+		if result.Err != nil {
+			return fmt.Errorf("removing narinfo %s of a deleted build: %w", result.ObjectName, result.Err)
+		}
+	}
+
+	return nil
 }
 
 // SignNarinfosHandler handles POST /api/pending_closures/{id}/sign endpoint.
@@ -625,6 +683,13 @@ func (s *Service) SignNarinfosHandler(w http.ResponseWriter, r *http.Request) {
 		if !validKeys[objectKey] {
 			slog.Error("Invalid narinfo key: not part of pending closure", "object_key", objectKey, "closure_id", parsedUploadID)
 			http.Error(w, "invalid narinfo key: not part of this pending closure", http.StatusForbidden)
+
+			return
+		}
+
+		// The narinfo is published under its key, so it has to describe that path.
+		if key, err := storePathToNarinfoKey(meta.StorePath); err != nil || key != objectKey {
+			http.Error(w, fmt.Sprintf("narinfo %s is for another store path: %s", objectKey, meta.StorePath), http.StatusBadRequest)
 
 			return
 		}
@@ -685,9 +750,29 @@ func (s *Service) SignNarinfosHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	slog.Info("Signed narinfos", "id", parsedUploadID, "count", len(signaturesMap))
+	claim := &narinfoClaim{}
 
-	writeJSONResponse(w, signNarinfosResponse{Signatures: signaturesMap})
+	if req.Claim {
+		claim, err = s.claimNarinfos(r.Context(), parsedUploadID, req.Narinfos, signaturesMap)
+	}
+
+	if err != nil {
+		if errors.Is(err, errPushNotFound) {
+			http.Error(w, "push not found", http.StatusNotFound)
+
+			return
+		}
+
+		slog.Error("Failed to claim narinfos", "id", parsedUploadID, "error", err)
+		http.Error(w, "failed to claim narinfos: "+err.Error(), http.StatusInternalServerError)
+
+		return
+	}
+
+	slog.Info("Signed narinfos", "id", parsedUploadID, "count", len(signaturesMap),
+		"claimed", len(claim.Lost), "published", len(claim.Published))
+
+	writeJSONResponse(w, signNarinfosResponse{Signatures: signaturesMap, Claimed: claim.Lost, Published: claim.Published})
 }
 
 // CommitPendingClosureHandler handles POST /api/pending_closures/{id}/complete endpoint.

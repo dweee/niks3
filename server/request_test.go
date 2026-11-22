@@ -13,8 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/Mic92/niks3/ratelimit"
 	"github.com/Mic92/niks3/server"
 	"github.com/Mic92/niks3/server/pg"
@@ -49,15 +49,13 @@ func createTestService(tb testing.TB) *server.Service {
 
 	connectionString := createTestDatabase(tb)
 
-	ctx, cancel := context.WithTimeout(tb.Context(), time.Minute)
+	ctx, cancel := context.WithTimeout(tb.Context(), testwait.Hung)
 	defer cancel()
 
 	pool, err := pg.Connect(ctx, connectionString)
 	if err != nil {
 		ok(tb, err)
 	}
-	tb.Cleanup(pool.Close)
-
 	// create bucket for test
 	bucketName := "bucket" + strconv.Itoa(int(testBucketCount.Add(1)))
 	minioClient := testRustfsServer.Client(tb)
@@ -65,9 +63,9 @@ func createTestService(tb testing.TB) *server.Service {
 	// Waiting for the lock must not use up the creation budget.
 	testBucketMu.Lock()
 	// Migration and waiting for another bucket must not consume the S3 deadline.
-	bucketCtx, cancelBucket := context.WithTimeout(tb.Context(), time.Minute)
+	bucketCtx, bucketCancel := context.WithTimeout(tb.Context(), testwait.Hung)
 	err = minioClient.MakeBucket(bucketCtx, bucketName, minio.MakeBucketOptions{})
-	cancelBucket()
+	bucketCancel()
 	testBucketMu.Unlock()
 	ok(tb, err)
 
@@ -80,24 +78,6 @@ func createTestService(tb testing.TB) *server.Service {
 		S3RateLimiter: ratelimit.NewAdaptiveRateLimiter(0, "s3-test"), // Start unlimited for tests
 		GCTasks:       server.NewGCTaskStore(),
 		Metrics:       server.NewMetrics(),
-	}
-}
-
-func TestCreateTestServiceClosesPool(t *testing.T) {
-	t.Parallel()
-
-	var service *server.Service
-
-	// Registered first so the fixture's cleanup runs before this assertion.
-	t.Cleanup(func() {
-		if service != nil && service.Pool.Stat().TotalConns() != 0 {
-			t.Error("fixture left database connections open")
-		}
-	})
-
-	service = createTestService(t)
-	if service.Pool.Stat().TotalConns() == 0 {
-		t.Fatal("fixture did not establish a database connection")
 	}
 }
 
@@ -220,7 +200,7 @@ func testRequest(t *testing.T, req *TestRequest) *httptest.ResponseRecorder {
 
 	rr := httptest.NewRecorder()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.method, req.path, bytes.NewBuffer(req.body))

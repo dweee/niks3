@@ -1,6 +1,7 @@
 name: Cache helper checks
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches: [flakey]
 permissions:

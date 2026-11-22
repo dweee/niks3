@@ -45,7 +45,10 @@ func printPushHelp() {
 	fmt.Fprintln(os.Stderr, "        arrive. Writes one JSON line per path to stdout:")
 	fmt.Fprintln(os.Stderr, `        {"path":"...","status":"ok"|"error","message":"...","signatures":["..."]}`)
 	fmt.Fprintln(os.Stderr, `        "skipped":"max-nar-size" next to "ok" means the path is not in the cache.`)
+	fmt.Fprintln(os.Stderr, `        "other_build":"sha256:..." next to "ok" means the cache serves another`)
+	fmt.Fprintln(os.Stderr, `        build of the path, with this NAR hash.`)
 	fmt.Fprintln(os.Stderr, `        A line {"paths":[...]} is pushed as one unit.`)
+	fmt.Fprintln(os.Stderr, `        A line {"log":"/nix/store/....drv"} pushes the kept log of a failed build.`)
 	fmt.Fprintln(os.Stderr, "        Exits after stdin is closed and everything was reported.")
 	fmt.Fprintf(os.Stderr, "  --batch-size int\n        With --stdin: max paths per push (default: %d)\n", client.DefaultStreamBatchSize)
 	fmt.Fprintf(os.Stderr, "  --parallel-pushes int\n        With --stdin: pushes running at once, each with up to\n        --max-concurrent-uploads NAR uploads (default: %d)\n", client.DefaultStreamParallel)
@@ -263,9 +266,8 @@ func pushStdinCommand(serverURL string, ts client.TokenSource, maxConcurrent, pa
 
 	defer c.WaitRegistrations()
 
-	pusher := client.NewStreamPusher(c.PushPaths, parallel, batchSize)
-	pusher.Signatures = c.Signatures
-	pusher.Skipped = c.Skipped
+	pusher := client.NewStreamPusher(c.PushPathsReport, parallel, batchSize)
+	pusher.PushLog = c.PushBuildLog
 
 	return pusher.Run(ctx, os.Stdin, os.Stdout) //nolint:wrapcheck // already descriptive
 }

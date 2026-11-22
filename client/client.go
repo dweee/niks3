@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -41,9 +42,6 @@ type Client struct {
 	ServerRateLimiter       *ratelimit.AdaptiveRateLimiter // Rate limiter for niks3 server API calls
 	registrations           errgroup.Group
 	registrationTimeout     time.Duration // 0 means registrationTimeout. Tests shorten it
-	signedMu                sync.Mutex
-	signed                  map[string][]string // store path -> what the server signed it with
-	skipped                 map[string]string   // store path -> why the size limit left it out
 	cacheConfigMu           sync.Mutex
 	cacheConfig             *api.CacheConfig
 	cacheConfigAt           time.Time
@@ -144,6 +142,12 @@ func NewClientWithTokenSource(ctx context.Context, serverURL string, ts TokenSou
 const maxConnsPerHost = 64
 
 func newTransport() *http.Transport {
+	return newStallingTransport(stallTimeout, nil)
+}
+
+// newStallingTransport gives up on a connection or request that hangs. Tests
+// pass their own dial.
+func newStallingTransport(timeout time.Duration, dial dialFunc) *http.Transport {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if ok {
 		t = t.Clone()
@@ -154,6 +158,18 @@ func newTransport() *http.Transport {
 	t.MaxIdleConns = 2 * maxConnsPerHost
 	t.MaxIdleConnsPerHost = maxConnsPerHost
 	t.MaxConnsPerHost = maxConnsPerHost
+
+	if dial == nil {
+		dial = t.DialContext
+	}
+
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+
+	t.DialContext = dialStalling(dial, timeout)
+	// A connection with HTTP/2 stays busy with other requests.
+	t.ResponseHeaderTimeout = timeout
 
 	return t
 }

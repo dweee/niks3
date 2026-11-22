@@ -3,15 +3,32 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/Mic92/niks3/api"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const farmLeadLockKey int64 = 0x6e696b73336c64 // "niks3ld"
+const (
+	farmLeadLockKey int64 = 0x6e696b73336c64 // "niks3ld"
+	// Held by a returning incumbent while it waits for the lead (claimLead).
+	farmClaimLockKey int64 = 0x6e696b7333636c // "niks3cl"
+)
+
+// leadClaimed only looks at the claim lock, so it cannot get in the way of an
+// incumbent taking it.
+func leadClaimed() string {
+	return fmt.Sprintf(`EXISTS (
+		SELECT FROM pg_locks
+		WHERE locktype = 'advisory' AND granted AND objsubid = 1
+		  AND classid = %d AND objid = %d
+		  AND database = (SELECT oid FROM pg_database WHERE datname = current_database()))`,
+		farmClaimLockKey>>32, farmClaimLockKey&0xffffffff) //nolint:mnd // halves of the key
+}
 
 //nolint:gochecknoglobals // tests shorten them
 var (
@@ -28,24 +45,72 @@ const leadPingTimeoutFloor = time.Second
 // otherwise hang it for about fifteen minutes, with the stream still open.
 func leadPingTimeout() time.Duration { return max(leadHeartbeat/2, leadPingTimeoutFloor) }
 
-// tryLead takes the session advisory lock on a dedicated connection, so the
-// lock lives exactly as long as that connection. A nil conn means someone
-// else leads.
-func tryLead(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, error) {
+type lead struct {
+	// The session advisory lock lives exactly as long as this connection.
+	conn *pgxpool.Conn
+}
+
+// tryLead takes the lock on a dedicated connection. Nil means someone else
+// leads, or, for a stream that is no incumbent, that one is on its way back.
+func tryLead(ctx context.Context, pool *pgxpool.Pool, incumbent bool) (*lead, error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, err //nolint:wrapcheck
 	}
 
-	var got bool
-	if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", farmLeadLockKey).Scan(&got); err != nil || !got {
-		conn.Release()
+	var locked bool
+
+	err = conn.QueryRow(ctx,
+		`SELECT ($2 OR NOT `+leadClaimed()+`) AND pg_try_advisory_lock($1)`,
+		farmLeadLockKey, incumbent).Scan(&locked)
+	if err != nil {
+		// The lock may have been taken before the query failed.
+		_ = conn.Hijack().Close(context.Background()) //nolint:contextcheck // must close even though ctx is done
 
 		return nil, err //nolint:wrapcheck
 	}
 
-	return conn, nil
+	if !locked {
+		conn.Release()
+
+		return nil, nil //nolint:nilnil // not leading is no error
+	}
+
+	return &lead{conn: conn}, nil
 }
+
+func (l *lead) release() {
+	_ = l.conn.Hijack().Close(context.Background())
+}
+
+// yields tells whether an incumbent wants the lock back.
+func (l *lead) yields(ctx context.Context) (bool, error) {
+	var claimed bool
+
+	err := l.conn.QueryRow(ctx, "SELECT "+leadClaimed()).Scan(&claimed)
+
+	return claimed, err //nolint:wrapcheck
+}
+
+// claimLead asks an unannounced holder to give the lead back and everybody
+// else not to take it. Only the lead lock decides who leads.
+func claimLead(ctx context.Context, pool *pgxpool.Pool) func() {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return func() {}
+	}
+
+	// Two incumbents cannot both be right; the second goes without.
+	_, _ = conn.Exec(ctx, "SELECT pg_try_advisory_lock($1)", farmClaimLockKey)
+
+	return sync.OnceFunc(func() { //nolint:contextcheck // must close even though ctx is done
+		_ = conn.Hijack().Close(context.Background())
+	})
+}
+
+// claimFor: the holder sees the claim within a heartbeat, the incumbent finds
+// the lock free within another.
+func claimFor() time.Duration { return 2*leadHeartbeat + leadPingTimeout() }
 
 // announceDelay is how long a new lock holder stays quiet. An incumbent comes
 // back after its own stream broke, so no older stream of its own is left to
@@ -78,7 +143,8 @@ func pingLead(ctx context.Context, conn *pgxpool.Conn) error {
 // A leader whose connection died keeps leading until its ping fails, but the
 // lock is already free. A new holder waits a heartbeat plus the ping timeout
 // before announcing, so the two leaders never overlap. The incumbent is the
-// exception: it only reconnects after its own stream broke.
+// exception: it only reconnects after its own stream broke, and a holder
+// still waiting then gives the lock back.
 func (s *Service) LeadHandler(w http.ResponseWriter, r *http.Request) {
 	defer closeRequestBody(r)
 
@@ -110,38 +176,75 @@ func (s *Service) LeadHandler(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 
 	var (
-		conn *pgxpool.Conn
+		held *lead
 		// announceAt is the earliest time a new lock holder may say true.
 		announceAt time.Time
 	)
 
 	defer func() { //nolint:contextcheck // must close even though ctx is done
-		if conn != nil {
-			_ = conn.Hijack().Close(context.Background())
+		if held != nil {
+			held.release()
 
 			slog.Info("lead: released", "remote", r.RemoteAddr)
 		}
 	}()
 
+	dropClaim := func() {}
+	claimUntil := time.Now().Add(claimFor())
+
+	if req.Incumbent {
+		dropClaim = claimLead(ctx, s.Pool)
+	}
+
+	defer dropClaim()
+
 	for {
-		if conn == nil && !time.Now().Before(holdBack) {
+		now := time.Now()
+		announced := held != nil && !now.Before(announceAt)
+
+		if held != nil || !now.Before(claimUntil) {
+			dropClaim()
+		}
+
+		switch {
+		case held == nil && !now.Before(holdBack):
 			var err error
-			if conn, err = tryLead(ctx, s.Pool); err != nil {
+			if held, err = tryLead(ctx, s.Pool, req.Incumbent); err != nil {
 				slog.Error("lead", "error", err)
 
 				return
 			}
 
-			if conn != nil {
+			if held != nil {
 				announceAt = time.Now().Add(announceDelay(req.Incumbent))
+				announced = !time.Now().Before(announceAt)
 
 				slog.Info("lead: acquired", "remote", r.RemoteAddr)
 			}
-		} else if conn != nil && pingLead(ctx, conn) != nil {
+		case held == nil:
+		case pingLead(ctx, held.conn) != nil:
 			return
+		case !announced:
+			yield, err := held.yields(ctx)
+			if err != nil {
+				return
+			}
+
+			if yield {
+				held.release() //nolint:contextcheck // closes with its own context
+
+				slog.Info("lead: given back to the incumbent", "remote", r.RemoteAddr)
+
+				held = nil
+			}
 		}
 
-		if err := enc.Encode(api.LeadStatus{Lead: conn != nil && !time.Now().Before(announceAt)}); err != nil {
+		var status api.LeadStatus
+		if held != nil && announced {
+			status = api.LeadStatus{Lead: true}
+		}
+
+		if err := enc.Encode(status); err != nil {
 			return
 		}
 

@@ -11,6 +11,44 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const awaitRecordingPushes = `-- name: AwaitRecordingPushes :exec
+SELECT pg_advisory_xact_lock($1::bigint)
+`
+
+// Waits until every push that is recording its objects has committed.
+func (q *Queries) AwaitRecordingPushes(ctx context.Context, lockKey int64) error {
+	_, err := q.db.Exec(ctx, awaitRecordingPushes, lockKey)
+	return err
+}
+
+const claimNarinfos = `-- name: ClaimNarinfos :one
+SELECT claim_narinfos(
+    $1::bigint, $2::varchar [], $3::varchar [], $4::jsonb [],
+    $5::boolean
+)::jsonb
+`
+
+type ClaimNarinfosParams struct {
+	PushID        int64    `json:"push_id"`
+	Keys          []string `json:"keys"`
+	NarKeys       []string `json:"nar_keys"`
+	Narinfos      [][]byte `json:"narinfos"`
+	InTransaction bool     `json:"in_transaction"`
+}
+
+func (q *Queries) ClaimNarinfos(ctx context.Context, arg ClaimNarinfosParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, claimNarinfos,
+		arg.PushID,
+		arg.Keys,
+		arg.NarKeys,
+		arg.Narinfos,
+		arg.InTransaction,
+	)
+	var column_1 []byte
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const cleanupPendingClosures = `-- name: CleanupPendingClosures :execrows
 WITH cutoff_time AS (
     SELECT $1::timestamp AS time
@@ -43,6 +81,12 @@ deleted_pending_objects AS (
     USING old_closures
     WHERE pending_objects.pending_closure_id = old_closures.id
     RETURNING pending_closure_id
+),
+
+deleted_receipts AS (
+    DELETE FROM commit_receipts
+    USING cutoff_time
+    WHERE commit_receipts.committed_at < cutoff_time.time
 )
 
 DELETE FROM pending_closures
@@ -103,6 +147,16 @@ func (q *Queries) CountPendingClosures(ctx context.Context) (int64, error) {
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const deleteClaims = `-- name: DeleteClaims :exec
+DELETE FROM publish_claims
+WHERE key = any($1::varchar [])
+`
+
+func (q *Queries) DeleteClaims(ctx context.Context, dollar_1 []string) error {
+	_, err := q.db.Exec(ctx, deleteClaims, dollar_1)
+	return err
 }
 
 const deleteMultipartUpload = `-- name: DeleteMultipartUpload :exec
@@ -299,6 +353,32 @@ func (q *Queries) GetKeysNotPending(ctx context.Context, keys []string) ([]strin
 	return items, nil
 }
 
+const getLiveObjects = `-- name: GetLiveObjects :many
+SELECT key FROM objects
+WHERE key = any($1::varchar []) AND deleted_at IS NULL
+`
+
+// GC-marked objects may vanish from S3 any moment, so they count as absent.
+func (q *Queries) GetLiveObjects(ctx context.Context, dollar_1 []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, getLiveObjects, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		items = append(items, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getMultipartUpload = `-- name: GetMultipartUpload :one
 SELECT pending_closure_id, object_key, upload_id
 FROM multipart_uploads
@@ -366,48 +446,6 @@ func (q *Queries) GetOldMultipartUploads(ctx context.Context, cutoff pgtype.Time
 	return items, nil
 }
 
-const getPendingObject = `-- name: GetPendingObject :one
-SELECT refs, size FROM pending_objects
-WHERE pending_closure_id = $1 AND key = $2
-`
-
-type GetPendingObjectParams struct {
-	PendingClosureID int64  `json:"pending_closure_id"`
-	Key              string `json:"key"`
-}
-
-type GetPendingObjectRow struct {
-	Refs []string    `json:"refs"`
-	Size pgtype.Int8 `json:"size"`
-}
-
-func (q *Queries) GetPendingObject(ctx context.Context, arg GetPendingObjectParams) (GetPendingObjectRow, error) {
-	row := q.db.QueryRow(ctx, getPendingObject, arg.PendingClosureID, arg.Key)
-	var i GetPendingObjectRow
-	err := row.Scan(&i.Refs, &i.Size)
-	return i, err
-}
-
-const getPendingObjectByKey = `-- name: GetPendingObjectByKey :one
-SELECT refs, size FROM pending_objects
-WHERE key = $1
-LIMIT 1
-`
-
-type GetPendingObjectByKeyRow struct {
-	Refs []string    `json:"refs"`
-	Size pgtype.Int8 `json:"size"`
-}
-
-// Any pending closure's row for this key; used to recover refs/size when the
-// upload is registered outside closure commit.
-func (q *Queries) GetPendingObjectByKey(ctx context.Context, key string) (GetPendingObjectByKeyRow, error) {
-	row := q.db.QueryRow(ctx, getPendingObjectByKey, key)
-	var i GetPendingObjectByKeyRow
-	err := row.Scan(&i.Refs, &i.Size)
-	return i, err
-}
-
 const getPendingObjectKeys = `-- name: GetPendingObjectKeys :many
 SELECT key FROM pending_objects
 WHERE pending_closure_id = $1
@@ -450,32 +488,6 @@ func (q *Queries) GetPin(ctx context.Context, name string) (Pin, error) {
 		&i.UpdatedAt,
 	)
 	return i, err
-}
-
-const getPresentObjects = `-- name: GetPresentObjects :many
-SELECT key FROM objects
-WHERE key = any($1::varchar []) AND deleted_at IS NULL
-`
-
-// GC-marked objects may vanish from S3 any moment, so they count as absent.
-func (q *Queries) GetPresentObjects(ctx context.Context, dollar_1 []string) ([]string, error) {
-	rows, err := q.db.Query(ctx, getPresentObjects, dollar_1)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []string
-	for rows.Next() {
-		var key string
-		if err := rows.Scan(&key); err != nil {
-			return nil, err
-		}
-		items = append(items, key)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const insertMultipartUpload = `-- name: InsertMultipartUpload :exec
@@ -542,6 +554,16 @@ func (q *Queries) InsertPush(ctx context.Context, arg InsertPushParams) (Pending
 	return i, err
 }
 
+const joinRecordingPushes = `-- name: JoinRecordingPushes :exec
+SELECT pg_advisory_xact_lock_shared($1::bigint)
+`
+
+// Makes the next mark wait until this transaction has committed.
+func (q *Queries) JoinRecordingPushes(ctx context.Context, lockKey int64) error {
+	_, err := q.db.Exec(ctx, joinRecordingPushes, lockKey)
+	return err
+}
+
 const listPins = `-- name: ListPins :many
 SELECT name, narinfo_key, store_path, created_at, updated_at
 FROM pins
@@ -578,7 +600,7 @@ const lockObjectsReadyForDeletion = `-- name: LockObjectsReadyForDeletion :many
 SELECT key
 FROM objects
 WHERE first_deleted_at IS NOT NULL
-  AND deleted_at IS NOT NULL
+  AND deleted_at > first_deleted_at
   AND first_deleted_at <= timezone('UTC', now()) - interval '1 second' * $1::int
   AND key > $2::varchar
   AND NOT EXISTS (
@@ -597,7 +619,7 @@ type LockObjectsReadyForDeletionParams struct {
 	LimitCount         int32  `json:"limit_count"`
 }
 
-// Tombstoned objects past the grace period, row-locked until the caller's
+// Objects two marks found unreachable, past the grace period, row-locked until the caller's
 // transaction ends. Rows a push transaction holds are skipped; the push is
 // about to treat them as present. Keyset-paginated on key.
 func (q *Queries) LockObjectsReadyForDeletion(ctx context.Context, arg LockObjectsReadyForDeletionParams) ([]string, error) {
@@ -655,19 +677,22 @@ const markStaleObjects = `-- name: MarkStaleObjects :execrows
 WITH RECURSIVE ct AS (
     SELECT timezone('UTC', now()) AS now
 ),
-closure_reach AS (
-    -- Start with all closure keys
-    SELECT o.key, o.refs
-    FROM objects o
-    INNER JOIN closures c ON o.key = c.key
+roots AS (
+    SELECT key FROM closures
     UNION
-    -- Recursively add all referenced objects
-    SELECT o.key, o.refs
-    FROM objects o
-    INNER JOIN closure_reach cr ON o.key = ANY(cr.refs)
+    SELECT key FROM pending_objects
+    UNION
+    SELECT unnest(refs) FROM pending_objects
+    UNION
+    SELECT unnest(roots || key) FROM pending_closures
 ),
 reachable_objects AS (
-    SELECT DISTINCT key FROM closure_reach
+    SELECT key::varchar FROM roots
+    UNION
+    SELECT ref
+    FROM reachable_objects AS ro
+    INNER JOIN objects AS o ON ro.key = o.key
+    CROSS JOIN LATERAL unnest(o.refs) AS ref
 ),
 stale_objects AS (
     SELECT o.key
@@ -683,9 +708,10 @@ stale_objects AS (
             FROM pending_objects AS po
             WHERE po.key = o.key
         )
-        AND o.deleted_at IS NULL  -- Only mark fresh objects
+        -- Live objects, and tombstoned ones no later mark has seen yet.
+        AND (o.deleted_at IS NULL OR o.deleted_at = o.first_deleted_at)
     ORDER BY o.key COLLATE "C"  -- lock in key order, like commit_pending_closure
-    FOR UPDATE
+    FOR NO KEY UPDATE
 )
 UPDATE objects
 SET
@@ -695,7 +721,11 @@ FROM stale_objects, ct
 WHERE objects.key = stale_objects.key
 `
 
-// Find all objects reachable from any closure
+// A pending push needs what its rows reference and what its roots reach.
+// Everything a root reaches. Only keys are carried along.
+// deleted_at moves past first_deleted_at when a later mark finds a tombstoned
+// object still unreachable. The sweep deletes only those: a push that
+// committed during the first mark is a root of the second.
 func (q *Queries) MarkStaleObjects(ctx context.Context) (int64, error) {
 	result, err := q.db.Exec(ctx, markStaleObjects)
 	if err != nil {
@@ -704,10 +734,90 @@ func (q *Queries) MarkStaleObjects(ctx context.Context) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
-const registerCompletedObject = `-- name: RegisterCompletedObject :exec
+const recordPendingObjects = `-- name: RecordPendingObjects :many
+INSERT INTO pending_objects (pending_closure_id, key, refs, size)
+SELECT
+    $1::bigint,
+    t.key,
+    t.refs,
+    t.size
+FROM jsonb_to_recordset($2::jsonb) AS t (key varchar, refs varchar [], size bigint)
+WHERE $3::bool OR NOT EXISTS (
+    SELECT 1 FROM objects AS o
+    WHERE o.key = t.key
+      AND o.deleted_at IS NULL
+      AND o.refs @> t.refs
+      AND (o.size IS NOT NULL OR t.size IS NULL)
+)
+RETURNING key
+`
+
+type RecordPendingObjectsParams struct {
+	PendingClosureID int64  `json:"pending_closure_id"`
+	Objects          []byte `json:"objects"`
+	EveryObject      bool   `json:"every_object"`
+}
+
+// Records the objects of a push that are not live, or that would gain
+// references or a size. With every_object it records all of them.
+func (q *Queries) RecordPendingObjects(ctx context.Context, arg RecordPendingObjectsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, recordPendingObjects, arg.PendingClosureID, arg.Objects, arg.EveryObject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		items = append(items, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recountObjectStats = `-- name: RecountObjectStats :exec
+WITH due AS (
+    SELECT id FROM object_stats
+    WHERE recount_at < timezone('UTC', now())
+    FOR UPDATE SKIP LOCKED
+)
+
+UPDATE object_stats AS s
+SET
+    (object_count, total_bytes) = (
+        SELECT
+            count(*),
+            coalesce(sum(size), 0)
+        FROM objects
+        WHERE deleted_at IS NULL
+    ),
+    recount_at = timezone('UTC', clock_timestamp())
+    + greatest(interval '5 minutes', 100 * (clock_timestamp() - statement_timestamp()))
+FROM due
+WHERE s.id = due.id
+`
+
+// Counts the live objects again once the count is five minutes old, or 100
+// times as old as the count took. recount_at is set after the count ran.
+// A server skips the count while another one is at it.
+func (q *Queries) RecountObjectStats(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, recountObjectStats)
+	return err
+}
+
+const registerCompletedObject = `-- name: RegisterCompletedObject :execrows
 INSERT INTO objects (key, refs, size)
-SELECT $1::varchar, $2::varchar [], $3
-WHERE EXISTS (SELECT 1 FROM pending_objects WHERE key = $1::varchar)
+SELECT
+    po.key,
+    po.refs,
+    po.size
+FROM pending_objects AS po
+WHERE po.key = $1::varchar AND po.pending_closure_id = $2::bigint
 ON CONFLICT (key) DO UPDATE SET
     refs = (
         SELECT ARRAY(
@@ -720,21 +830,22 @@ ON CONFLICT (key) DO UPDATE SET
 `
 
 type RegisterCompletedObjectParams struct {
-	Key  string      `json:"key"`
-	Refs []string    `json:"refs"`
-	Size pgtype.Int8 `json:"size"`
+	Key              string `json:"key"`
+	PendingClosureID int64  `json:"pending_closure_id"`
 }
 
-// Record an object as soon as its upload completes so later closures don't
-// re-offer it if this closure never commits. Only while a pending row exists:
-// that row keeps the sweep away from the object. Conflict handling matches
-// commit_pending_closure: merge refs, keep a known size, resurrect tombstones.
-func (q *Queries) RegisterCompletedObject(ctx context.Context, arg RegisterCompletedObjectParams) error {
-	_, err := q.db.Exec(ctx, registerCompletedObject, arg.Key, arg.Refs, arg.Size)
-	return err
+// Records an uploaded object before its push commits, so a later push is not
+// asked for it again if this one dies. Only while the push has its pending
+// row: that row kept the sweep away since before the upload.
+func (q *Queries) RegisterCompletedObject(ctx context.Context, arg RegisterCompletedObjectParams) (int64, error) {
+	result, err := q.db.Exec(ctx, registerCompletedObject, arg.Key, arg.PendingClosureID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
-const touchPresentClosures = `-- name: TouchPresentClosures :many
+const touchLiveClosures = `-- name: TouchLiveClosures :many
 WITH live AS (
     SELECT
         c.key,
@@ -759,8 +870,8 @@ SELECT key FROM live
 // Rows younger than ten minutes keep their age, since GC cuts off by days.
 // Locking in byte order stops overlapping callers from deadlocking, and waits
 // for a GC delete in flight.
-func (q *Queries) TouchPresentClosures(ctx context.Context, dollar_1 []string) ([]string, error) {
-	rows, err := q.db.Query(ctx, touchPresentClosures, dollar_1)
+func (q *Queries) TouchLiveClosures(ctx context.Context, dollar_1 []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, touchLiveClosures, dollar_1)
 	if err != nil {
 		return nil, err
 	}

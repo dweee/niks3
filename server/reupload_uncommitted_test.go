@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -17,7 +17,7 @@ import (
 func TestCompletedNarNotReofferedAcrossClosures(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 	defer cancel()
 
 	service := createTestService(t)
@@ -80,7 +80,7 @@ func TestCompletedNarNotReofferedAcrossClosures(t *testing.T) {
 func TestPresignedUploadRegisteredBeforeCommit(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 	defer cancel()
 
 	service := createTestService(t)
@@ -110,7 +110,7 @@ func TestPresignedUploadRegisteredBeforeCommit(t *testing.T) {
 	handlePresignedUpload(ctx, t, nar.PresignedURL)
 
 	// Registering an unknown key must be rejected.
-	body, err := json.Marshal(map[string]any{"object_key": narKeyFor("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjj99")})
+	body, err := json.Marshal(map[string]any{"object_key": narKeyFor("jjjjjjjjjjjjjjjjjjjjjjjjjjjjjj99"), "push_id": first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestPresignedUploadRegisteredBeforeCommit(t *testing.T) {
 		checkResponse: &checkNotFound,
 	})
 
-	body, err = json.Marshal(map[string]any{"object_key": narKey})
+	body, err = json.Marshal(map[string]any{"object_key": narKey, "push_id": first.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,5 +140,42 @@ func TestPresignedUploadRegisteredBeforeCommit(t *testing.T) {
 	second := createPendingClosure(t, service, closureFor(secondNarinfo))
 	if reoffered, ok := second.PendingObjects[narKey]; ok {
 		t.Errorf("NAR already in S3 was re-offered for upload (presigned=%q)", reoffered.PresignedURL)
+	}
+}
+
+// The pending row of another push says nothing about this upload: the sweep
+// may have deleted the object since.
+func TestUploadIsRegisteredOnlyForItsOwnPush(t *testing.T) {
+	t.Parallel()
+
+	service := createTestService(t)
+	defer service.Close()
+
+	narKey := narKeyFor("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkk01")
+	narinfo := "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkk10.narinfo"
+
+	other := createPendingClosure(t, service, map[string]any{
+		"closure": narinfo,
+		"objects": []map[string]any{
+			{"key": narinfo, "type": "narinfo", "refs": []string{narKey}},
+			{"key": narKey, "type": "nar", "refs": []string{}, "nar_size": 1024},
+		},
+	})
+	handlePresignedUpload(t.Context(), t, other.PendingObjects[narKey].PresignedURL)
+
+	body, err := json.Marshal(map[string]any{"object_key": narKey, "push_id": "999999"})
+	ok(t, err)
+
+	checkNotFound := checkStatusCode(http.StatusNotFound)
+	testRequest(t, &TestRequest{
+		method:        "POST",
+		path:          "/api/uploads/complete",
+		body:          body,
+		handler:       service.CompleteUploadHandler,
+		checkResponse: &checkNotFound,
+	})
+
+	if countRows(t, service, `SELECT count(*) FROM objects WHERE key = $1`, narKey) != 0 {
+		t.Fatalf("%s is live through the pending row of another push", narKey)
 	}
 }

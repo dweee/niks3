@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 )
@@ -23,12 +24,10 @@ var ErrTokenValidationFailed = errors.New("token validation failed")
 type ValidationError struct {
 	// Reason is a human-readable description of why validation failed
 	Reason string
-	// Provider is the provider name that was tried (if any)
+	// Provider is the provider the token's issuer names (if any)
 	Provider string
 	// Claims contains the token claims (if successfully parsed)
 	Claims map[string]any
-	// TriedProviders lists all providers that were attempted
-	TriedProviders []string
 }
 
 func (e *ValidationError) Error() string {
@@ -47,13 +46,49 @@ func (e *ValidationError) Unwrap() error {
 // Validator validates OIDC tokens against configured providers.
 type Validator struct {
 	config    *Config
-	verifiers map[string]*providerVerifier // provider name -> verifier
+	verifiers map[string][]*providerVerifier // issuer -> verifiers for distinct audiences
 }
 
 type providerVerifier struct {
-	provider *gooidc.Provider
 	verifier *gooidc.IDTokenVerifier
 	config   *ProviderConfig
+}
+
+// ErrProviderUnavailable: the provider of a token did not hand out its keys.
+var ErrProviderUnavailable = errors.New("oidc provider is unavailable")
+
+// keySet tells the caller of Verify when the key fetch failed.
+type keySet struct{ keys gooidc.KeySet }
+
+type fetchFailureKey struct{}
+
+func (k keySet) VerifySignature(ctx context.Context, jwt string) ([]byte, error) {
+	payload, err := k.keys.VerifySignature(ctx, jwt)
+	// A failed fetch is the one error of go-oidc's key set that wraps a cause.
+	if failure, ok := ctx.Value(fetchFailureKey{}).(*error); ok && errors.Unwrap(err) != nil {
+		*failure = err
+	}
+
+	return payload, err //nolint:wrapcheck // go-oidc adds the context
+}
+
+func discover(ctx context.Context, issuer string) (string, []string, error) {
+	provider, err := gooidc.NewProvider(ctx, issuer)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to initialize OIDC provider for %s: %w", issuer, err)
+	}
+
+	var doc struct {
+		JWKSURL    string   `json:"jwks_uri"`
+		Algorithms []string `json:"id_token_signing_alg_values_supported"`
+	}
+	if err := provider.Claims(&doc); err != nil {
+		return "", nil, fmt.Errorf("discovery document of %s: %w", issuer, err)
+	}
+
+	algs := slices.DeleteFunc(doc.Algorithms, func(alg string) bool { return !slices.Contains(asymmetricAlgs, alg) })
+
+	return doc.JWKSURL, algs, nil
 }
 
 // ValidatedClaims contains the validated claims from a token.
@@ -95,9 +130,13 @@ func (t *bearerFileTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return resp, nil
 }
 
+// Verifications of a provider wait for its key fetch in flight.
+const fetchTimeout = 10 * time.Second
+
 func httpClientFor(p *ProviderConfig) (*http.Client, error) {
+	client := &http.Client{Timeout: fetchTimeout}
 	if p.CAFile == "" && p.BearerTokenFile == "" {
-		return http.DefaultClient, nil
+		return client, nil
 	}
 
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
@@ -116,12 +155,12 @@ func httpClientFor(p *ProviderConfig) (*http.Client, error) {
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 
-	var rt http.RoundTripper = transport
+	client.Transport = transport
 	if p.BearerTokenFile != "" {
-		rt = &bearerFileTransport{path: p.BearerTokenFile, base: transport}
+		client.Transport = &bearerFileTransport{path: p.BearerTokenFile, base: transport}
 	}
 
-	return &http.Client{Transport: rt}, nil
+	return client, nil
 }
 
 // asymmetricAlgs is accepted when discovery is skipped. The JWKS key type
@@ -137,7 +176,7 @@ var asymmetricAlgs = []string{ //nolint:gochecknoglobals
 func NewValidator(ctx context.Context, cfg *Config) (*Validator, error) {
 	v := &Validator{
 		config:    cfg,
-		verifiers: make(map[string]*providerVerifier, len(cfg.Providers)),
+		verifiers: make(map[string][]*providerVerifier, len(cfg.Providers)),
 	}
 
 	// Initialize each provider
@@ -152,27 +191,20 @@ func NewValidator(ctx context.Context, cfg *Config) (*Validator, error) {
 		// go-oidc reuses this context's client for later JWKS fetches.
 		clientCtx := gooidc.ClientContext(ctx, client)
 
-		var provider *gooidc.Provider
-		if providerCfg.JWKSURL != "" {
-			provider = (&gooidc.ProviderConfig{
-				IssuerURL:  providerCfg.Issuer,
-				JWKSURL:    providerCfg.JWKSURL,
-				Algorithms: asymmetricAlgs,
-			}).NewProvider(clientCtx)
-		} else if provider, err = gooidc.NewProvider(clientCtx, providerCfg.Issuer); err != nil {
-			return nil, fmt.Errorf("failed to initialize OIDC provider for %s: %w", providerCfg.Issuer, err)
+		jwksURL, algs := providerCfg.JWKSURL, asymmetricAlgs
+		if jwksURL == "" {
+			if jwksURL, algs, err = discover(clientCtx, providerCfg.Issuer); err != nil {
+				return nil, err
+			}
 		}
 
-		// Create the verifier with our expected audience
-		verifier := provider.Verifier(&gooidc.Config{
-			ClientID: providerCfg.Audience,
+		v.verifiers[providerCfg.Issuer] = append(v.verifiers[providerCfg.Issuer], &providerVerifier{
+			verifier: gooidc.NewVerifier(providerCfg.Issuer, keySet{gooidc.NewRemoteKeySet(clientCtx, jwksURL)}, &gooidc.Config{
+				ClientID:             providerCfg.Audience,
+				SupportedSigningAlgs: algs,
+			}),
+			config: providerCfg,
 		})
-
-		v.verifiers[name] = &providerVerifier{
-			provider: provider,
-			verifier: verifier,
-			config:   providerCfg,
-		}
 
 		slog.Info("OIDC provider initialized", "name", name, "issuer", providerCfg.Issuer)
 	}
@@ -224,75 +256,81 @@ func (v *Validator) AudienceForIssuer(issuer string) (string, bool) {
 	return audience, audience != ""
 }
 
-// ValidateToken validates a JWT token and returns the validated claims.
-// On failure, returns a *ValidationError with detailed information about why validation failed.
+// ValidateToken verifies a JWT with the provider its issuer names and returns
+// the validated claims, or a *ValidationError.
 func (v *Validator) ValidateToken(ctx context.Context, tokenString string) (*ValidatedClaims, error) {
-	triedProviders := make([]string, 0, len(v.verifiers))
+	issuer, err := unverifiedIssuer(tokenString)
+	if err != nil {
+		return nil, &ValidationError{Reason: err.Error()}
+	}
 
-	// Try each provider's verifier
-	// go-oidc will check issuer claim matches the provider
-	for _, pv := range v.verifiers {
-		triedProviders = append(triedProviders, pv.config.Name())
+	// go-oidc accepts Google's scheme-less issuer too.
+	if issuer == "accounts.google.com" {
+		issuer = "https://accounts.google.com"
+	}
 
-		idToken, err := pv.verifier.Verify(ctx, tokenString)
-		if err != nil {
-			slog.Debug("OIDC token verification failed", "provider", pv.config.Name(), "error", err)
+	providers := v.verifiers[issuer]
+	if len(providers) == 0 {
+		return nil, &ValidationError{Reason: fmt.Sprintf("no provider is configured for issuer %q", issuer)}
+	}
+
+	// The unverified issuer only selects which configured verifiers to try.
+	// Each verifier still checks the signature, issuer, and its own audience.
+	var validationErr error
+	for _, pv := range providers {
+		var fetchFailure error
+
+		idToken, err := pv.verifier.Verify(context.WithValue(ctx, fetchFailureKey{}, &fetchFailure), tokenString)
+		if fetchFailure != nil {
+			validationErr = fmt.Errorf("%w: %s: %w", ErrProviderUnavailable, pv.config.Name(), fetchFailure)
 
 			continue
 		}
-		// A multi-audience token must not choose a scope policy based on Go
-		// map iteration order. Require one configured audience for this issuer.
-		matchingAudiences := 0
-		for _, other := range v.verifiers {
-			if other.config.Issuer == pv.config.Issuer && slices.Contains(idToken.Audience, other.config.Audience) {
-				matchingAudiences++
-			}
-		}
-		if matchingAudiences > 1 {
-			return nil, &ValidationError{
-				Reason:   "token matches multiple configured audiences",
-				Provider: pv.config.Name(), TriedProviders: triedProviders,
-			}
-		}
 
-		// Token verified! Extract claims
-		var claims map[string]any
-		if err := idToken.Claims(&claims); err != nil {
-			slog.Debug("Failed to extract claims", "provider", pv.config.Name(), "error", err)
-
-			return nil, &ValidationError{
-				Reason:         fmt.Sprintf("failed to extract claims: %v", err),
-				Provider:       pv.config.Name(),
-				Claims:         nil,
-				TriedProviders: triedProviders,
-			}
-		}
-
-		scopes, pins, err := matchRules(claims, pv.config.effectiveRules())
 		if err != nil {
-			slog.Debug("No rule matched", "provider", pv.config.Name(), "error", err)
+			if !errors.Is(validationErr, ErrProviderUnavailable) {
+				validationErr = &ValidationError{Reason: err.Error(), Provider: pv.config.Name()}
+			}
 
-			return nil, &ValidationError{
-				Reason:         err.Error(),
-				Provider:       pv.config.Name(),
-				Claims:         claims,
-				TriedProviders: triedProviders,
+			continue
+		}
+
+		// Reject a token that could select more than one scope policy at this issuer.
+		for _, other := range providers {
+			if other != pv && slices.Contains(idToken.Audience, other.config.Audience) {
+				return nil, &ValidationError{Reason: "token matches multiple configured audiences", Provider: pv.config.Name()}
 			}
 		}
 
-		return &ValidatedClaims{
-			Subject:   idToken.Subject,
-			Issuer:    pv.config.Issuer,
-			Provider:  pv.config.Name(),
-			Scopes:    scopes,
-			Pins:      pins,
-			RawClaims: claims,
-		}, nil
+		return claimsForProvider(idToken, pv)
 	}
 
-	// No provider matched - return detailed error
-	return nil, &ValidationError{
-		Reason:         "no provider could verify the token (signature or issuer mismatch)",
-		TriedProviders: triedProviders,
+	return nil, validationErr
+}
+
+func claimsForProvider(idToken *gooidc.IDToken, pv *providerVerifier) (*ValidatedClaims, error) {
+	fail := func(reason string, claims map[string]any) (*ValidatedClaims, error) {
+		slog.Debug("OIDC token rejected", "provider", pv.config.Name(), "reason", reason)
+
+		return nil, &ValidationError{Reason: reason, Provider: pv.config.Name(), Claims: claims}
 	}
+
+	var claims map[string]any
+	if err := idToken.Claims(&claims); err != nil {
+		return fail(fmt.Sprintf("failed to extract claims: %v", err), nil)
+	}
+
+	scopes, pins, err := matchRules(claims, pv.config.effectiveRules())
+	if err != nil {
+		return fail(err.Error(), claims)
+	}
+
+	return &ValidatedClaims{
+		Subject:   idToken.Subject,
+		Issuer:    pv.config.Issuer,
+		Provider:  pv.config.Name(),
+		Scopes:    scopes,
+		Pins:      pins,
+		RawClaims: claims,
+	}, nil
 }

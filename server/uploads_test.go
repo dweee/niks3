@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/Mic92/niks3/server"
 	"github.com/minio/minio-go/v7"
 )
@@ -247,7 +247,7 @@ func TestService_createPendingClosureHandler(t *testing.T) {
 	service := createTestService(t)
 	defer service.Close()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 	defer cancel()
 
 	invalidBody, err := json.Marshal(map[string]any{})
@@ -308,7 +308,7 @@ func TestService_createPendingClosureHandler(t *testing.T) {
 	commitPendingClosure(t, service, pendingClosureResponse.ID, narinfoMetadata)
 
 	// The client's upload registration races the commit and may land after it.
-	lateBody, err := json.Marshal(map[string]any{"object_key": secondObject})
+	lateBody, err := json.Marshal(map[string]any{"object_key": secondObject, "push_id": pendingClosureResponse.ID})
 	ok(t, err)
 	testRequest(t, &TestRequest{
 		method:  "POST",
@@ -383,7 +383,7 @@ func TestService_verifyS3Integrity(t *testing.T) {
 	service := createTestService(t)
 	defer service.Close()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 	defer cancel()
 
 	// Step 1: Upload a closure
@@ -460,7 +460,7 @@ func TestService_verifyS3ReuploadsStaleNarinfo(t *testing.T) {
 			service := createTestService(t)
 			defer service.Close()
 
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 			defer cancel()
 
 			closure := hashPrefix + tc.recorded[0]

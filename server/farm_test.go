@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Mic92/niks3/api"
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/Mic92/niks3/server"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -68,30 +69,36 @@ func (l *leadStream) next() api.LeadStatus {
 		}
 
 		return st
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		l.t.Fatal("timeout waiting for lead status")
 	}
 
 	return api.LeadStatus{}
 }
 
-// until skips heartbeats until want matches, for at most ten seconds.
-func (l *leadStream) until(want api.LeadStatus) {
+// until skips heartbeats until the stream says lead.
+func (l *leadStream) until(lead bool) {
 	l.t.Helper()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testwait.Hung)
 
 	for time.Now().Before(deadline) {
-		if l.next() == want {
+		if l.next().Lead == lead {
 			return
 		}
 	}
 
-	l.t.Fatalf("never saw %+v", want)
+	l.t.Fatalf("never saw lead: %v", lead)
 }
 
 func (l *leadStream) close() {
 	l.cancel()
+
+	go func() {
+		for range l.lines {
+		}
+	}()
+
 	<-l.done
 }
 
@@ -104,12 +111,12 @@ func TestLeadElectsOneAndHandsOver(t *testing.T) {
 	a := openLead(t, s)
 	defer a.close()
 
-	a.until(api.LeadStatus{Lead: true})
+	a.until(true)
 
 	b := openLead(t, s)
 	defer b.close()
 
-	b.until(api.LeadStatus{Lead: false})
+	b.until(false)
 
 	// Still exactly one leader a few beats later.
 	for range 3 {
@@ -127,14 +134,14 @@ func TestLeadElectsOneAndHandsOver(t *testing.T) {
 	released := time.Now()
 
 	a.close()
-	b.until(api.LeadStatus{Lead: true})
+	b.until(true)
 
 	if since, bound := time.Since(released), server.LeadHeartbeat()+server.LeadPingTimeout(); since < bound {
 		t.Fatalf("b announced leadership %s after a released it, within a heartbeat and a ping timeout (%s)", since, bound)
 	}
 
 	c := openLead(t, s)
-	c.until(api.LeadStatus{Lead: false})
+	c.until(false)
 	c.close()
 	b.close()
 }
@@ -173,10 +180,10 @@ func TestLeadIncumbentWinsAfterRestart(t *testing.T) { //nolint:paralleltest // 
 	server.RestartedNow(10 * server.LeadHeartbeat())
 
 	standby := openLeadAs(t, s, false)
-	standby.until(api.LeadStatus{Lead: false})
+	standby.until(false)
 
 	incumbent := openLeadAs(t, s, true)
-	incumbent.until(api.LeadStatus{Lead: true})
+	incumbent.until(true)
 
 	for range 12 {
 		if st := standby.next(); st.Lead {
@@ -185,8 +192,56 @@ func TestLeadIncumbentWinsAfterRestart(t *testing.T) { //nolint:paralleltest // 
 	}
 
 	incumbent.close()
-	standby.until(api.LeadStatus{Lead: true})
+	standby.until(true)
 	standby.close()
+}
+
+// The Postgres backend that holds the lead lock, or 0.
+func leadHolder(t *testing.T, s *server.Service) int {
+	t.Helper()
+
+	var pid int
+	ok(t, s.Pool.QueryRow(t.Context(), `
+		SELECT coalesce(max(pid), 0) FROM pg_locks
+		WHERE locktype = 'advisory' AND granted AND objid = $1
+		  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+		server.FarmLeadLockKey&0xffffffff).Scan(&pid))
+
+	return pid
+}
+
+// The standby holds the lock but nobody has heard of it yet.
+func TestLeadUnannouncedStandbyYieldsToIncumbent(t *testing.T) {
+	t.Parallel()
+
+	s := createTestService(t)
+	defer s.Close()
+
+	leader := openLead(t, s)
+	leader.until(true)
+
+	standby := openLead(t, s)
+	defer standby.close()
+
+	standby.until(false)
+
+	was := leadHolder(t, s)
+	leader.close()
+
+	for now := was; now == was || now == 0; now = leadHolder(t, s) {
+		time.Sleep(time.Millisecond)
+	}
+
+	back := openLeadAs(t, s, true)
+	defer back.close()
+
+	back.until(true)
+
+	for range 2 * int(server.LeadPingTimeout()/server.LeadHeartbeat()) {
+		if standby.next().Lead {
+			t.Fatal("the standby leads although the incumbent came back before it said so")
+		}
+	}
 }
 
 // A restart closes every stream of the old process, so the incumbent that
@@ -216,12 +271,12 @@ func TestLeadEndsOnShutdown(t *testing.T) {
 	s.Streams = streams
 
 	a := openLead(t, s)
-	a.until(api.LeadStatus{Lead: true})
+	a.until(true)
 	stop()
 
 	select {
 	case <-a.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("stream survived shutdown")
 	}
 }
@@ -327,12 +382,12 @@ func TestLeadEndsWhenItsConnectionHangs(t *testing.T) { //nolint:paralleltest //
 	// Unblock a leader stuck on the dead connection before waiting for it.
 	defer proxy.close()
 
-	a.until(api.LeadStatus{Lead: true})
+	a.until(true)
 
 	b := openLead(t, s)
 	defer b.close()
 
-	b.until(api.LeadStatus{Lead: false})
+	b.until(false)
 
 	proxy.cut.Store(true)
 
@@ -347,7 +402,7 @@ func TestLeadEndsWhenItsConnectionHangs(t *testing.T) { //nolint:paralleltest //
 		t.Fatal("leader's session was not terminated")
 	}
 
-	b.until(api.LeadStatus{Lead: true})
+	b.until(true)
 
 	select {
 	case <-a.done:

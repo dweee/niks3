@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -84,12 +85,13 @@ func NewTestClientForServer(serverURL string) (*Client, error) {
 
 // UploadMultipart re-exports uploadMultipart for the external test package.
 func (c *Client) UploadMultipart(ctx context.Context, r io.Reader, info *MultipartUploadInfo, objectKey string, partSize int) error {
-	return c.uploadMultipart(ctx, r, info, objectKey, partSize)
-}
+	produce := func(w io.Writer) error {
+		_, err := io.Copy(w, r)
 
-// RecordSignatures re-exports (*Client).recordSignatures for tests.
-func (c *Client) RecordSignatures(narinfos map[string]NarinfoMetadata, signatures map[string][]string) {
-	c.recordSignatures(narinfos, signatures)
+		return err //nolint:wrapcheck // the test's own error
+	}
+
+	return c.uploadMultipart(ctx, produce, info, objectKey, partSize)
 }
 
 // UploadNARWithListing re-exports uploadNARWithListing for the external test package.
@@ -102,7 +104,7 @@ func (c *Client) SetRegistrationTimeout(d time.Duration) {
 	c.registrationTimeout = d
 }
 
-// SetTestHookTaken makes Run call f once it has taken line.
-func (s *StreamPusher) SetTestHookTaken(f func(line string)) {
-	s.testHookTaken = f
+// NewStallingTransport re-exports newStallingTransport for tests.
+func NewStallingTransport(timeout time.Duration, dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	return newStallingTransport(timeout, dial)
 }
