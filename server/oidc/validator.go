@@ -283,6 +283,7 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenString string) (*Val
 		idToken, err := pv.verifier.Verify(context.WithValue(ctx, fetchFailureKey{}, &fetchFailure), tokenString)
 		if fetchFailure != nil {
 			validationErr = fmt.Errorf("%w: %s: %w", ErrProviderUnavailable, pv.config.Name(), fetchFailure)
+
 			continue
 		}
 
@@ -290,6 +291,7 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenString string) (*Val
 			if !errors.Is(validationErr, ErrProviderUnavailable) {
 				validationErr = &ValidationError{Reason: err.Error(), Provider: pv.config.Name()}
 			}
+
 			continue
 		}
 
