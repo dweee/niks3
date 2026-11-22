@@ -51,13 +51,13 @@ jobs:
         id: cache_transfer
         if: ${{ always() && !cancelled() && hashFiles('cache-outputs.txt') != '' }}
         env:
-          ATTIC_MAX_CLOSURE_MIB: ${{ vars.ATTIC_MAX_CLOSURE_MIB || '8192' }}
-        run: python3 ci/transfer-attic.py export --directory attic-transfer --manifest cache-outputs.txt
+          MAX_CLOSURE_MIB: ${{ vars.MAX_CLOSURE_MIB || '8192' }}
+        run: python3 ci/transfer-closures.py export --directory closure-transfer --manifest cache-outputs.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ always() && !cancelled() && steps.cache_transfer.outcome == 'success' }}
         with:
           name: niks3-docker-cache-${{ github.sha }}
-          path: attic-transfer/
+          path: closure-transfer/
           retention-days: 1
           compression-level: 0
           if-no-files-found: error

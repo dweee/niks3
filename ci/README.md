@@ -13,7 +13,7 @@ Trusted default-branch jobs configure refreshing read-only Niks3 access before
 bootstrap; PR events receive no private reader or publisher.
 
 The shared helpers match the controller migration used by the other owning
-forks; compatibility filenames containing Attic do not enable Attic writes.
+forks.
 Set DAVE_FORK_CI_ENABLED=true and NIKS3_PUSH_ENABLED=true to enable the native
 workflow and trusted publication. The backend reader rollout must be applied
 before default-branch authenticated reuse is verified.
