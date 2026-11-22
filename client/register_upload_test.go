@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Mic92/niks3/client"
+	"github.com/Mic92/niks3/internal/testwait"
 )
 
 func TestRegisterUploadedObject_BoundedAgainstSilentServer(t *testing.T) {
@@ -33,7 +34,7 @@ func TestRegisterUploadedObject_BoundedAgainstSilentServer(t *testing.T) {
 	c.SetRegistrationTimeout(100 * time.Millisecond)
 
 	for range 3 {
-		c.RegisterUploadedObject(t.Context(), "abc.narinfo")
+		c.RegisterUploadedObject(t.Context(), "1", "abc.narinfo")
 	}
 
 	done := make(chan struct{})
@@ -46,7 +47,7 @@ func TestRegisterUploadedObject_BoundedAgainstSilentServer(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("WaitRegistrations did not return: registrations against a silent server are unbounded")
 	}
 }
@@ -70,7 +71,7 @@ func TestRegisterUploadedObject_OutlivesPush(t *testing.T) {
 	pushCtx, cancelPush := context.WithCancel(t.Context())
 	cancelPush()
 
-	c.RegisterUploadedObject(pushCtx, "abc.narinfo")
+	c.RegisterUploadedObject(pushCtx, "1", "abc.narinfo")
 	c.WaitRegistrations()
 
 	if n := received.Load(); n != 1 {

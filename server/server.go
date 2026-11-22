@@ -26,7 +26,10 @@ import (
 
 type options struct {
 	DBConnectionString string
-	HTTPAddr           string
+	// DBRDSIAMRegion, when set, makes every database connection authenticate
+	// with an RDS IAM token for this region.
+	DBRDSIAMRegion string
+	HTTPAddr       string
 
 	S3Endpoint string
 	// S3PublicURL, when set, is the externally reachable S3 base URL
@@ -147,17 +150,6 @@ type Service struct {
 
 	GCTasks *GCTaskStore
 	Metrics *Metrics
-
-	// testHookBeforePendingInsert runs right before a pending closure is
-	// written. Tests use it to interleave a GC run with a push.
-	testHookBeforePendingInsert func()
-	// testHookAfterPresenceCheck runs once a push has decided what is present.
-	testHookAfterPresenceCheck func()
-	// testHookAfterSweepSelect runs after the sweep locked a batch, before it
-	// rechecks pending rows.
-	testHookAfterSweepSelect func()
-	// testHookBeforeProxyGet runs between the proxy's Stat and GET.
-	testHookBeforeProxyGet func()
 }
 
 // Close closes the database connection pool.
@@ -211,13 +203,27 @@ func NewPresignClient(
 	return client, nil
 }
 
+func connectDB(ctx context.Context, opts *options) (*pgxpool.Pool, error) {
+	var dbOpts []pg.Option
+	if opts.DBRDSIAMRegion != "" {
+		dbOpts = append(dbOpts, pg.WithRDSIAMAuth(opts.DBRDSIAMRegion))
+	}
+
+	pool, err := pg.Connect(ctx, opts.DBConnectionString, dbOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	return pool, nil
+}
+
 func runServer(opts *options) error {
 	ctx, cancel := context.WithTimeout(context.Background(), dbConnectionTimeout)
 	defer cancel()
 
-	pool, err := pg.Connect(ctx, opts.DBConnectionString)
+	pool, err := connectDB(ctx, opts)
 	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
+		return err
 	}
 	defer pool.Close()
 
@@ -668,7 +674,8 @@ func (s *Service) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/uploads/complete", s.RequireScope(oidc.ScopeWrite, s.CompleteUploadHandler))
 	mux.HandleFunc("POST /api/uploads/skipped", s.RequireScope(oidc.ScopeWrite, s.SkippedUploadsHandler))
 	mux.HandleFunc("POST /api/multipart/request-parts", s.RequireScope(oidc.ScopeWrite, s.RequestMorePartsHandler))
-	mux.HandleFunc("HEAD /api/objects/{key...}", s.RequireScope(oidc.ScopeWrite, s.ObjectExistsHandler))
+	mux.HandleFunc("POST /api/closures/exists", s.RequireScope(oidc.ScopeWrite, s.ClosuresExistHandler))
+	mux.HandleFunc("POST /api/objects/exists", s.RequireScope(oidc.ScopeWrite, s.ObjectsExistHandler))
 	mux.HandleFunc("POST /api/objects/present", s.RequireScope(oidc.ScopeWrite, s.PresentHandler))
 	mux.HandleFunc("POST /api/farm/lead", s.RequireScope(oidc.ScopeWrite, s.LeadHandler))
 	mux.HandleFunc("GET /api/closures/{key}", s.RequireScope(oidc.ScopeWrite, s.GetClosureHandler))
@@ -696,7 +703,6 @@ func (s *Service) logAuthFailure(token string, oidcErr *oidc.ValidationError) {
 			"token_length", len(token),
 			"oidc_error", oidcErr.Reason,
 			"oidc_provider", oidcErr.Provider,
-			"tried_providers", oidcErr.TriedProviders,
 		)
 		// Log claims if available (helps debug bound_claims/bound_subject mismatches)
 		if oidcErr.Claims != nil {

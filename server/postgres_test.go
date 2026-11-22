@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/Mic92/niks3/internal/testwait"
 )
 
 var (
@@ -87,12 +89,7 @@ func startPostgresServer(ctx context.Context) (*postgresServer, error) {
 		}
 	}()
 
-	for range 30 {
-		// Check if context has been cancelled/timed out
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("timeout waiting for postgres to start: %w", ctx.Err())
-		}
-
+	for deadline := time.Now().Add(testwait.Hung); time.Now().Before(deadline) && ctx.Err() == nil; {
 		waitForPostgres := exec.CommandContext(ctx, "pg_isready", "-h", tempDir, "-U", "postgres")
 		waitForPostgres.Stdout = os.Stdout
 		waitForPostgres.Stderr = os.Stderr

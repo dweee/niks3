@@ -11,11 +11,62 @@ RETURNING *;
 -- name: CommitPush :one
 SELECT commit_push($1::bigint)::bigint;
 
+-- name: AwaitRecordingPushes :exec
+-- Waits until every push that is recording its objects has committed.
+SELECT pg_advisory_xact_lock(sqlc.arg(lock_key)::bigint);
+
+-- name: JoinRecordingPushes :exec
+-- Makes the next mark wait until this transaction has committed.
+SELECT pg_advisory_xact_lock_shared(sqlc.arg(lock_key)::bigint);
+
+-- name: RecordPendingObjects :many
+-- Records the objects of a push that are not live, or that would gain
+-- references or a size. With every_object it records all of them.
+INSERT INTO pending_objects (pending_closure_id, key, refs, size)
+SELECT
+    sqlc.arg(pending_closure_id)::bigint,
+    t.key,
+    t.refs,
+    t.size
+FROM jsonb_to_recordset(sqlc.arg(objects)::jsonb) AS t (key varchar, refs varchar [], size bigint)
+WHERE sqlc.arg(every_object)::bool OR NOT EXISTS (
+    SELECT 1 FROM objects AS o
+    WHERE o.key = t.key
+      AND o.deleted_at IS NULL
+      AND o.refs @> t.refs
+      AND (o.size IS NOT NULL OR t.size IS NULL)
+)
+RETURNING key;
+
 -- name: InsertPendingObjects :copyfrom
 INSERT INTO pending_objects (pending_closure_id, key, refs, size) VALUES ($1, $2, $3, $4);
 
 -- name: GetObjectStats :one
 SELECT object_count, total_bytes FROM object_stats WHERE id;
+
+-- name: RecountObjectStats :exec
+-- Counts the live objects again once the count is five minutes old, or 100
+-- times as old as the count took. recount_at is set after the count ran.
+-- A server skips the count while another one is at it.
+WITH due AS (
+    SELECT id FROM object_stats
+    WHERE recount_at < timezone('UTC', now())
+    FOR UPDATE SKIP LOCKED
+)
+
+UPDATE object_stats AS s
+SET
+    (object_count, total_bytes) = (
+        SELECT
+            count(*),
+            coalesce(sum(size), 0)
+        FROM objects
+        WHERE deleted_at IS NULL
+    ),
+    recount_at = timezone('UTC', clock_timestamp())
+    + greatest(interval '5 minutes', 100 * (clock_timestamp() - statement_timestamp()))
+FROM due
+WHERE s.id = due.id;
 
 -- name: CountPendingClosures :one
 SELECT count(*) FROM pending_closures;
@@ -47,12 +98,12 @@ FROM objects AS o, ct
 WHERE key = any($1::varchar [])
 FOR KEY SHARE OF o;
 
--- name: GetPresentObjects :many
+-- name: GetLiveObjects :many
 -- GC-marked objects may vanish from S3 any moment, so they count as absent.
 SELECT key FROM objects
 WHERE key = any($1::varchar []) AND deleted_at IS NULL;
 
--- name: TouchPresentClosures :many
+-- name: TouchLiveClosures :many
 -- Rows younger than ten minutes keep their age, since GC cuts off by days.
 -- Locking in byte order stops overlapping callers from deadlocking, and waits
 -- for a GC delete in flight.
@@ -79,14 +130,17 @@ SELECT key FROM live;
 -- name: CommitPendingClosure :one
 SELECT commit_pending_closure($1::bigint)::bigint;
 
--- name: RegisterCompletedObject :exec
--- Record an object as soon as its upload completes so later closures don't
--- re-offer it if this closure never commits. Only while a pending row exists:
--- that row keeps the sweep away from the object. Conflict handling matches
--- commit_pending_closure: merge refs, keep a known size, resurrect tombstones.
+-- name: RegisterCompletedObject :execrows
+-- Records an uploaded object before its push commits, so a later push is not
+-- asked for it again if this one dies. Only while the push has its pending
+-- row: that row kept the sweep away since before the upload.
 INSERT INTO objects (key, refs, size)
-SELECT sqlc.arg(key)::varchar, sqlc.arg(refs)::varchar [], sqlc.arg(size)
-WHERE EXISTS (SELECT 1 FROM pending_objects WHERE key = sqlc.arg(key)::varchar)
+SELECT
+    po.key,
+    po.refs,
+    po.size
+FROM pending_objects AS po
+WHERE po.key = sqlc.arg(key)::varchar AND po.pending_closure_id = sqlc.arg(pending_closure_id)::bigint
 ON CONFLICT (key) DO UPDATE SET
     refs = (
         SELECT ARRAY(
@@ -96,17 +150,6 @@ ON CONFLICT (key) DO UPDATE SET
     size = coalesce(objects.size, excluded.size),
     deleted_at = NULL,
     first_deleted_at = NULL;
-
--- name: GetPendingObject :one
-SELECT refs, size FROM pending_objects
-WHERE pending_closure_id = $1 AND key = $2;
-
--- name: GetPendingObjectByKey :one
--- Any pending closure's row for this key; used to recover refs/size when the
--- upload is registered outside closure commit.
-SELECT refs, size FROM pending_objects
-WHERE key = $1
-LIMIT 1;
 
 -- name: CleanupPendingClosures :execrows
 -- Pass the cutoff that GetOldMultipartUploads used. Closures in keep are left
@@ -147,6 +190,12 @@ deleted_pending_objects AS (
     USING old_closures
     WHERE pending_objects.pending_closure_id = old_closures.id
     RETURNING pending_closure_id
+),
+
+deleted_receipts AS (
+    DELETE FROM commit_receipts
+    USING cutoff_time
+    WHERE commit_receipts.committed_at < cutoff_time.time
 )
 
 -- Delete pending closures older than the specified interval
@@ -196,6 +245,16 @@ WHERE key = any($1::varchar [])
 DELETE FROM objects
 WHERE key = any($1::varchar []);
 
+-- name: DeleteClaims :exec
+DELETE FROM publish_claims
+WHERE key = any($1::varchar []);
+
+-- name: ClaimNarinfos :one
+SELECT claim_narinfos(
+    sqlc.arg(push_id)::bigint, sqlc.arg(keys)::varchar [], sqlc.arg(nar_keys)::varchar [], sqlc.arg(narinfos)::jsonb [],
+    sqlc.arg(in_transaction)::boolean
+)::jsonb;
+
 -- name: InsertMultipartUpload :exec
 INSERT INTO multipart_uploads (pending_closure_id, object_key, upload_id)
 VALUES ($1, $2, $3);
@@ -219,20 +278,24 @@ WHERE upload_id = $1 AND object_key = $2;
 WITH RECURSIVE ct AS (
     SELECT timezone('UTC', now()) AS now
 ),
--- Find all objects reachable from any closure
-closure_reach AS (
-    -- Start with all closure keys
-    SELECT o.key, o.refs
-    FROM objects o
-    INNER JOIN closures c ON o.key = c.key
+-- A pending push needs what its rows reference and what its roots reach.
+roots AS (
+    SELECT key FROM closures
     UNION
-    -- Recursively add all referenced objects
-    SELECT o.key, o.refs
-    FROM objects o
-    INNER JOIN closure_reach cr ON o.key = ANY(cr.refs)
+    SELECT key FROM pending_objects
+    UNION
+    SELECT unnest(refs) FROM pending_objects
+    UNION
+    SELECT unnest(roots || key) FROM pending_closures
 ),
+-- Everything a root reaches. Only keys are carried along.
 reachable_objects AS (
-    SELECT DISTINCT key FROM closure_reach
+    SELECT key::varchar FROM roots
+    UNION
+    SELECT ref
+    FROM reachable_objects AS ro
+    INNER JOIN objects AS o ON ro.key = o.key
+    CROSS JOIN LATERAL unnest(o.refs) AS ref
 ),
 stale_objects AS (
     SELECT o.key
@@ -248,10 +311,14 @@ stale_objects AS (
             FROM pending_objects AS po
             WHERE po.key = o.key
         )
-        AND o.deleted_at IS NULL  -- Only mark fresh objects
+        -- Live objects, and tombstoned ones no later mark has seen yet.
+        AND (o.deleted_at IS NULL OR o.deleted_at = o.first_deleted_at)
     ORDER BY o.key COLLATE "C"  -- lock in key order, like commit_pending_closure
-    FOR UPDATE
+    FOR NO KEY UPDATE
 )
+-- deleted_at moves past first_deleted_at when a later mark finds a tombstoned
+-- object still unreachable. The sweep deletes only those: a push that
+-- committed during the first mark is a root of the second.
 UPDATE objects
 SET
     deleted_at = ct.now,
@@ -260,13 +327,13 @@ FROM stale_objects, ct
 WHERE objects.key = stale_objects.key;
 
 -- name: LockObjectsReadyForDeletion :many
--- Tombstoned objects past the grace period, row-locked until the caller's
+-- Objects two marks found unreachable, past the grace period, row-locked until the caller's
 -- transaction ends. Rows a push transaction holds are skipped; the push is
 -- about to treat them as present. Keyset-paginated on key.
 SELECT key
 FROM objects
 WHERE first_deleted_at IS NOT NULL
-  AND deleted_at IS NOT NULL
+  AND deleted_at > first_deleted_at
   AND first_deleted_at <= timezone('UTC', now()) - interval '1 second' * sqlc.arg(grace_period_seconds)::int
   AND key > sqlc.arg(after_key)::varchar
   AND NOT EXISTS (

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Mic92/niks3/client"
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/Mic92/niks3/server"
 	"github.com/Mic92/niks3/server/oidc"
 	"github.com/klauspost/compress/zstd"
@@ -30,6 +31,12 @@ const (
 
 // getNARURLFromNarinfo fetches a narinfo from S3, decompresses it, and extracts the URL field.
 func getNARURLFromNarinfo(ctx context.Context, t *testing.T, testService *server.Service, narinfoKey string) string {
+	t.Helper()
+
+	return narinfoField(ctx, t, testService, narinfoKey, "URL")
+}
+
+func narinfoField(ctx context.Context, t *testing.T, testService *server.Service, narinfoKey, field string) string {
 	t.Helper()
 
 	narinfoObj, err := testService.MinioClient.GetObject(ctx, testService.Bucket, narinfoKey, minio.GetObjectOptions{})
@@ -50,14 +57,13 @@ func getNARURLFromNarinfo(ctx context.Context, t *testing.T, testService *server
 	narinfoText, err := io.ReadAll(decoder)
 	ok(t, err)
 
-	// Extract URL from narinfo
 	for line := range strings.SplitSeq(string(narinfoText), "\n") {
-		if after, ok0 := strings.CutPrefix(line, "URL: "); ok0 {
+		if after, ok0 := strings.CutPrefix(line, field+": "); ok0 {
 			return after
 		}
 	}
 
-	t.Fatal("No URL found in narinfo")
+	t.Fatalf("No %s found in narinfo", field)
 
 	return ""
 }
@@ -295,7 +301,7 @@ func TestClientIntegration(t *testing.T) {
 		t.Fatalf("Client failed: %v", err)
 	}
 
-	// A second push is answered by /api/objects/present alone.
+	// A second push is answered by /api/closures/exists alone.
 	pendingCalls.Store(0)
 
 	err = pushToServer(ctx, ts.URL, testAuthToken, []string{storePath}, nixEnv)
@@ -661,6 +667,18 @@ func TestClientWithDependencies(t *testing.T) {
 
 	runClientAndVerifyUpload(ctx, t, testService, storePath, ts.URL, testAuthToken, nixEnv)
 
+	var logKey string
+
+	ok(t, testService.Pool.QueryRow(ctx, "SELECT key FROM objects WHERE key LIKE 'log/%'").Scan(&logKey))
+
+	if st := testService.RunGCForTest(720*time.Hour, 0, true); st.State != "succeeded" {
+		t.Fatalf("GC failed: %s", st.Error)
+	}
+
+	if !objectInS3(t, testService, logKey) {
+		t.Errorf("build log %s was collected although its closure is live", logKey)
+	}
+
 	testRetrieveWithNixCopy(ctx, t, testService, storePath, nixEnv)
 }
 
@@ -679,6 +697,59 @@ func nixEvalStorePath(t *testing.T, nixEnv []string, expr string) string {
 	}
 
 	return strings.Trim(strings.TrimSpace(string(output)), `"`)
+}
+
+// A mark that was running when the push started tombstones a dependency the
+// push was told is cached.
+func TestClientPushesAgainWhenADependencyIsCollected(t *testing.T) {
+	t.Parallel()
+
+	testService := createTestServiceWithAuth(t, testAuthToken)
+	t.Cleanup(func() { testService.Close() })
+
+	ok(t, testService.InitializeBucket(t.Context()))
+
+	mux := http.NewServeMux()
+	registerTestHandlers(mux, testService)
+
+	ctx := t.Context()
+	nixEnv := setupIsolatedNixStore(t)
+
+	depExpr := `builtins.toFile "collected-dep" "dependency"`
+	depPath := nixEvalStorePath(t, nixEnv, depExpr)
+	topPath := nixEvalStorePath(t, nixEnv, `builtins.toFile "top" "${`+depExpr+`}"`)
+
+	var created atomic.Int32
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r)
+
+		if r.URL.Path == "/api/pushes" && created.Add(1) == 1 {
+			_, err := testService.Pool.Exec(r.Context(),
+				`UPDATE objects SET deleted_at = now(), first_deleted_at = now()`)
+			if err != nil {
+				t.Errorf("marking the dependency: %v", err)
+			}
+		}
+	}))
+	t.Cleanup(ts.Close)
+
+	ok(t, pushToServer(ctx, ts.URL, testAuthToken, []string{depPath}, nixEnv))
+
+	_, err := testService.Pool.Exec(ctx, `DELETE FROM closures`)
+	ok(t, err)
+
+	created.Store(0)
+	ok(t, pushToServer(ctx, ts.URL, testAuthToken, []string{topPath}, nixEnv))
+
+	for _, storePath := range []string{depPath, topPath} {
+		hash, err := client.GetStorePathHash(storePath)
+		ok(t, err)
+
+		if n := countRows(t, testService, `SELECT count(*) FROM objects WHERE key = $1 AND deleted_at IS NULL`, hash+".narinfo"); n != 1 {
+			t.Errorf("%s is not live after the push", storePath)
+		}
+	}
 }
 
 // Regression test: a second client commits a shared dependency between the two
@@ -813,7 +884,7 @@ func TestPinProtectsFromGC(t *testing.T) {
 	select {
 	case err := <-gcDone:
 		ok(t, err)
-	case <-time.After(10 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("GC blocked behind the pin request's row lock")
 	}
 
@@ -885,4 +956,129 @@ func TestPinProtectsFromGC(t *testing.T) {
 	}
 
 	t.Log("Pin successfully protected closure from garbage collection")
+}
+
+// Two builds of one derivation differ. The cache serves the build that was
+// signed first, and the push of the second build learns which one that is.
+func TestClientPublishesTheFirstBuild(t *testing.T) {
+	t.Parallel()
+
+	testService := createTestServiceWithAuth(t, testAuthToken)
+	t.Cleanup(func() { testService.Close() })
+
+	ok(t, testService.InitializeBucket(t.Context()))
+
+	mux := http.NewServeMux()
+	registerTestHandlers(mux, testService)
+
+	// The second push signs before or after the first one commits.
+	for _, signs := range []string{"before", "after"} {
+		t.Run("second push signs "+signs+" the commit", func(t *testing.T) {
+			t.Parallel()
+
+			ctx := t.Context()
+			nixEnv := setupIsolatedNixStore(t)
+
+			// The builds run without a sandbox and copy a file the test changes.
+			dir := t.TempDir()
+			expr, input := filepath.Join(dir, "impure.nix"), filepath.Join(dir, "input")
+			ok(t, os.WriteFile(expr, []byte(`derivation {
+				name = "impure";
+				system = builtins.currentSystem;
+				builder = "/bin/sh";
+				args = [ "-c" "read line < `+input+`; echo $line > $out" ];
+			}`), 0o600))
+
+			nix := func(args ...string) string {
+				//nolint:gosec
+				cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+				cmd.Env = nixEnv
+
+				out, err := cmd.Output()
+				ok(t, err)
+
+				return strings.TrimSpace(string(out))
+			}
+			build := func(content string) (string, string) {
+				ok(t, os.WriteFile(input, []byte(content+"\n"), 0o600))
+
+				path := nix("nix-build", expr, "--no-out-link")
+
+				return path, nix("nix-store", "--query", "--hash", path)
+			}
+
+			path, firstHash := build("first")
+
+			// A driver may name the path by a link to it.
+			link := filepath.Join(dir, "result")
+			ok(t, os.Symlink(path, link))
+
+			// push returns the build the client says the cache serves in place of its own.
+			push := func(url string) string {
+				pusher, err := client.NewClient(ctx, url, testAuthToken)
+				ok(t, err)
+
+				pusher.NixEnv = nixEnv
+
+				reports, err := pusher.PushPathsReport(ctx, []string{link})
+				ok(t, err)
+
+				return reports[link].OtherBuild
+			}
+
+			var (
+				completes, signatures atomic.Int32
+				second                = make(chan string, 1)
+				atSign                = make(chan struct{})
+				committed             = make(chan struct{})
+			)
+
+			// The first push stops before its commit until the second push
+			// finished or reached its sign request.
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				commit := strings.HasPrefix(r.URL.Path, "/api/pushes/") && strings.HasSuffix(r.URL.Path, "/complete")
+
+				switch {
+				case commit && completes.Add(1) == 1:
+					nix("nix-store", "--delete", path)
+
+					build("second")
+
+					go func() { second <- push("http://" + r.Host) }()
+
+					if signs == "before" {
+						second <- <-second
+					} else {
+						<-atSign
+					}
+
+					mux.ServeHTTP(w, r)
+					close(committed)
+
+					return
+				case strings.HasSuffix(r.URL.Path, "/sign") && signatures.Add(1) == 2 && signs == "after":
+					close(atSign)
+					<-committed
+				}
+
+				mux.ServeHTTP(w, r)
+			}))
+			t.Cleanup(ts.Close)
+
+			if other := push(ts.URL); other != "" {
+				t.Errorf("first push was told the cache serves %s", other)
+			}
+
+			if other := <-second; other != firstHash {
+				t.Errorf("second push was told the cache serves %q, want the first build %s", other, firstHash)
+			}
+
+			hash, err := client.GetStorePathHash(path)
+			ok(t, err)
+
+			if got := narinfoField(ctx, t, testService, hash+".narinfo", "NarHash"); got != firstHash {
+				t.Errorf("cache serves %s, want the first build %s", got, firstHash)
+			}
+		})
+	}
 }

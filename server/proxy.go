@@ -168,6 +168,9 @@ var (
 
 	// realisations: realisations/{hash-algo}:{hex}!{output}.doi
 	realisationsRe = regexp.MustCompile(`^realisations/[a-z0-9]+:[a-zA-Z0-9+/=]+![a-zA-Z0-9+._?=-]+\.doi$`)
+
+	// pins: pins/{name}, a plain-text store path written by CreatePinHandler.
+	pinRe = regexp.MustCompile(`^pins/` + pinNamePattern + `$`)
 )
 
 // IsValidCachePath checks whether a path matches a known Nix binary cache object pattern.
@@ -212,6 +215,10 @@ func IsValidCachePath(path string) bool {
 	}
 
 	if realisationsRe.MatchString(path) {
+		return true
+	}
+
+	if pinRe.MatchString(path) {
 		return true
 	}
 
@@ -375,10 +382,6 @@ func (s *Service) handleProxyGet(w http.ResponseWriter, r *http.Request, key str
 
 			return
 		}
-	}
-
-	if s.testHookBeforeProxyGet != nil {
-		s.testHookBeforeProxyGet()
 	}
 
 	// Client.GetObject is lazy and only sends the request on the first Read,

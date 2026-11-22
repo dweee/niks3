@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/Mic92/niks3/ratelimit"
 	"github.com/Mic92/niks3/server"
 	"github.com/klauspost/compress/zstd"
@@ -37,10 +38,14 @@ func TestIsValidCachePath(t *testing.T) {
 		{"realisation", "realisations/sha256:abc123def456!out.doi", true},
 		{"nix-cache-info", "nix-cache-info", true},
 		{"index.html", "index.html", true},
+		{"pin", "pins/myapp", true},
+		{"pin all alphabet chars", "pins/My-App_1.0", true},
 
 		// Path traversal
 		{"traversal parent", "../etc/passwd", false},
 		{"traversal in middle", "nar/../../../etc/passwd", false},
+		// pinNamePattern accepts "..", so the segment check must reject this.
+		{"pin traversal", "pins/..", false},
 
 		// Wrong nix base32 chars (e, t, u are not in nix base32)
 		{"invalid char e", "26xbg1ndr7hbcncrlf9nhx5is2b25e13.narinfo", false},
@@ -52,6 +57,9 @@ func TestIsValidCachePath(t *testing.T) {
 		{"leading slash", "/26xbg1ndr7hbcncrlf9nhx5is2b25d13.narinfo", false},
 		{"wrong extension", "26xbg1ndr7hbcncrlf9nhx5is2b25d13.narinfo.bak", false},
 		{"short hash", "abc.narinfo", false},
+		{"pin empty name", "pins/", false},
+		{"pin nested", "pins/a/b", false},
+		{"pin invalid char", "pins/my app", false},
 	}
 
 	for _, tc := range tests {
@@ -362,10 +370,14 @@ func TestReadProxy404(t *testing.T) {
 		minio.PutObjectOptions{ContentEncoding: "zstd"})
 	putTestObject(ctx, t, service, narKey, bytes.Repeat([]byte("nar"), 1024), minio.PutObjectOptions{})
 
+	s3 := service.MinioClient
+
 	var deleteBeforeGet string
 
-	service.SetTestHookBeforeProxyGet(func() {
-		ok(t, service.MinioClient.RemoveObject(ctx, service.Bucket, deleteBeforeGet, minio.RemoveObjectOptions{}))
+	beforeS3Request(t, service, func(r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/"+service.Bucket+"/"+deleteBeforeGet {
+			ok(t, s3.RemoveObject(ctx, service.Bucket, deleteBeforeGet, minio.RemoveObjectOptions{}))
+		}
 	})
 
 	for _, key := range []string{narinfoKey, narKey} {
@@ -523,7 +535,7 @@ func TestReadProxyConditionalGet(t *testing.T) {
 	}
 
 	// Conditional GET with matching ETag → 304
-	ctx2, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx2, cancel := context.WithTimeout(t.Context(), testwait.Hung)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, ts.URL+"/26xbg1ndr7hbcncrlf9nhx5is2b25d13.narinfo", nil)

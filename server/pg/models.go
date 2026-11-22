@@ -13,6 +13,11 @@ type Closure struct {
 	UpdatedAt pgtype.Timestamp `json:"updated_at"`
 }
 
+type CommitReceipt struct {
+	PendingClosureID int64            `json:"pending_closure_id"`
+	CommittedAt      pgtype.Timestamp `json:"committed_at"`
+}
+
 type MultipartUpload struct {
 	PendingClosureID int64  `json:"pending_closure_id"`
 	ObjectKey        string `json:"object_key"`
@@ -28,9 +33,10 @@ type Object struct {
 }
 
 type ObjectStat struct {
-	ID          bool  `json:"id"`
-	ObjectCount int64 `json:"object_count"`
-	TotalBytes  int64 `json:"total_bytes"`
+	ID          bool             `json:"id"`
+	ObjectCount int64            `json:"object_count"`
+	TotalBytes  int64            `json:"total_bytes"`
+	RecountAt   pgtype.Timestamp `json:"recount_at"`
 }
 
 type PendingClosure struct {
@@ -53,4 +59,10 @@ type Pin struct {
 	StorePath  string             `json:"store_path"`
 	CreatedAt  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
+type PublishClaim struct {
+	Key     string `json:"key"`
+	NarKey  string `json:"nar_key"`
+	Narinfo []byte `json:"narinfo"`
 }

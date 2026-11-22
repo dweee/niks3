@@ -13,9 +13,11 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Mic92/niks3/hook"
+	"github.com/Mic92/niks3/internal/testwait"
 )
 
 // TestServerClientIntegration tests the full server+client flow: multiple
@@ -259,7 +261,7 @@ func TestServerStalledClientDoesNotBlockShutdown(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("Serve did not return while a client held an idle connection")
 	}
 }
@@ -268,6 +270,13 @@ func TestServerStalledClientDoesNotBlockShutdown(t *testing.T) {
 // wait out the backoff.
 func TestServerBacksOffOnAcceptErrors(t *testing.T) {
 	t.Parallel()
+
+	// In the bubble's clock a shutdown that does not wait takes no time.
+	synctest.Test(t, testServerBacksOffOnAcceptErrors)
+}
+
+func testServerBacksOffOnAcceptErrors(t *testing.T) {
+	t.Helper()
 
 	ln := &failingListener{closed: make(chan struct{}), eighth: make(chan struct{})}
 	srv := hook.NewServer(ln, func(_ []string) error { return nil })
@@ -281,7 +290,7 @@ func TestServerBacksOffOnAcceptErrors(t *testing.T) {
 	start := time.Now()
 	<-done
 
-	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+	if elapsed := time.Since(start); elapsed != 0 {
 		t.Errorf("Serve took %v to return: shutdown waited out the backoff", elapsed)
 	}
 

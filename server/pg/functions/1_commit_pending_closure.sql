@@ -18,6 +18,10 @@ BEGIN
     FOR UPDATE;
 
     if closure_key is null then
+        IF EXISTS (SELECT 1 FROM commit_receipts WHERE pending_closure_id = closure_id) THEN
+            RETURN 0;
+        END IF;
+
         RAISE EXCEPTION 'Closure does not exist: id=%', closure_id;
     end if;
 
@@ -34,14 +38,19 @@ BEGIN
     ORDER BY key COLLATE "C"
     ON CONFLICT (key)
     DO UPDATE SET
-        -- If object exists, merge references (union of arrays, removing duplicates)
-        refs = (
-            SELECT ARRAY(
-                SELECT DISTINCT unnest(
-                    objects.refs || EXCLUDED.refs
+        -- A tombstoned object was uploaded again and gets the new references.
+        -- A live one keeps its own and gains the new ones. Its file was not
+        -- uploaded again, so a narinfo keeps the one NAR it names.
+        refs = CASE
+            WHEN objects.deleted_at IS NOT NULL THEN EXCLUDED.refs
+            ELSE ARRAY(
+                SELECT DISTINCT r
+                FROM unnest(objects.refs || EXCLUDED.refs) AS r
+                WHERE r NOT LIKE 'nar/%' OR r = any(objects.refs) OR NOT EXISTS (
+                    SELECT 1 FROM unnest(objects.refs) AS own WHERE own LIKE 'nar/%'
                 )
             )
-        ),
+        END,
         -- Keep an existing size; set it only when currently unknown.
         size = COALESCE(objects.size, EXCLUDED.size),
         -- Resurrect previously tombstoned objects
@@ -52,12 +61,18 @@ BEGIN
         OR NOT (objects.refs @> EXCLUDED.refs)
         OR (objects.size IS NULL AND EXCLUDED.size IS NOT NULL);
 
+    -- The committed objects now say which build the cache serves.
+    DELETE FROM publish_claims
+    WHERE key IN (SELECT key FROM pending_objects WHERE pending_closure_id = closure_id);
+
     -- Delete the pending objects
     DELETE FROM pending_objects WHERE pending_closure_id = closure_id;
     GET DIAGNOSTICS folded = ROW_COUNT;
 
     -- Delete the pending closure
     DELETE FROM pending_closures WHERE id = closure_id;
+
+    INSERT INTO commit_receipts (pending_closure_id, committed_at) VALUES (closure_id, now);
 
     RETURN folded;
 END;

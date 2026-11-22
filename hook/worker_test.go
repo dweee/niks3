@@ -9,9 +9,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Mic92/niks3/hook"
+	"github.com/Mic92/niks3/internal/testwait"
 )
 
 // writeTestFile creates a file simulating an existing store path.
@@ -79,7 +81,7 @@ func startWorker(t *testing.T, q *hook.Queue, push hook.PushFunc, batchSize int)
 
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(testwait.Hung):
 			t.Fatal("timeout waiting for worker to stop")
 		}
 	}
@@ -89,7 +91,7 @@ func startWorker(t *testing.T, q *hook.Queue, push hook.PushFunc, batchSize int)
 func waitForCount(t *testing.T, q *hook.Queue, n int) {
 	t.Helper()
 
-	deadline := time.After(5 * time.Second)
+	deadline := time.After(testwait.Hung)
 
 	for {
 		if count, _ := q.Count(); count == n {
@@ -148,7 +150,7 @@ func drainWorkerTimeout(
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("timeout waiting for drain to finish")
 	}
 }
@@ -386,6 +388,16 @@ func TestWorkerPrunesClosureDeps(t *testing.T) {
 func TestDrainTimeout(t *testing.T) {
 	t.Parallel()
 
+	// The bubble's clock only moves once the drain waits for its timeout,
+	// so a slow machine cannot make it look ignored.
+	synctest.Test(t, testDrainTimeout)
+}
+
+func testDrainTimeout(t *testing.T) {
+	t.Helper()
+
+	const timeout = 200 * time.Millisecond
+
 	q := newTestQueue(t)
 	paths := enqueueFiles(t, q, "a", "b", "c", "d")
 
@@ -400,10 +412,10 @@ func TestDrainTimeout(t *testing.T) {
 
 	start := time.Now()
 
-	drainWorkerTimeout(t, q, push, 2, 200*time.Millisecond)
+	drainWorkerTimeout(t, q, push, 2, timeout)
 
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("drain ignored its timeout, took %s", elapsed)
+	if elapsed := time.Since(start); elapsed != timeout {
+		t.Errorf("drain took %s, want its timeout of %s", elapsed, timeout)
 	}
 
 	if n := calls.Load(); n != 1 {

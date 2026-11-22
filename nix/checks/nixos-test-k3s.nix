@@ -174,6 +174,9 @@ testers.runNixOSTest {
       machine.succeed("kubectl -n niks3 get deployment niks3 -o jsonpath='{.metadata.annotations.reloader\\.stakater\\.com/auto}' | grep true")
       machine.wait_until_succeeds("curl -sf http://localhost:${toString nodePort}/readyz | grep OK", timeout=60)
 
+    # niks3 looks up the API server by name to fetch the keys that signed the tokens.
+    machine.wait_until_succeeds("kubectl -n kube-system rollout status deployment coredns --timeout=10s", timeout=300)
+
     # Same JWT a pod gets from a projected serviceAccountToken volume.
     machine.wait_until_succeeds("kubectl -n ci get sa builder", timeout=60)
     machine.succeed("kubectl -n ci create token builder --audience niks3 > /tmp/builder.jwt")
@@ -184,7 +187,8 @@ testers.runNixOSTest {
     with subtest("allowed service account can push via workload identity"):
       print(machine.succeed(push.format("builder", path)))
       hash = path.removeprefix("/nix/store/").split("-")[0]
-      machine.succeed(f"curl -sf -H 'Authorization: Bearer ${apiToken}' -I http://localhost:${toString nodePort}/api/objects/{hash}.narinfo")
+      exists = machine.succeed(f"curl -sf -H 'Authorization: Bearer ${apiToken}' --json '{{\"keys\":[\"{hash}.narinfo\"]}}' http://localhost:${toString nodePort}/api/objects/exists")
+      assert f"{hash}.narinfo" in exists, exists
 
     with subtest("write scope does not grant admin"):
       status = "curl -s -o /dev/null -w '%{{http_code}}' -H \"Authorization: Bearer $(cat /tmp/{}.jwt)\" http://localhost:${toString nodePort}/api/gc/status"

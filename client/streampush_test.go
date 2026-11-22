@@ -2,19 +2,25 @@ package client_test
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Mic92/niks3/client"
+	"github.com/Mic92/niks3/internal/testwait"
 )
 
 type result struct {
@@ -30,16 +36,7 @@ type result struct {
 func runStream(t *testing.T, push client.StreamPushFunc, parallel, batch int, feed func(w io.Writer)) []result {
 	t.Helper()
 
-	return runStreamSigned(t, push, nil, parallel, batch, feed)
-}
-
-func runStreamSigned(t *testing.T, push client.StreamPushFunc, sigs func(string) []string, parallel, batch int, feed func(w io.Writer)) []result {
-	t.Helper()
-
-	s := client.NewStreamPusher(push, parallel, batch)
-	s.Signatures = sigs
-
-	return runPusher(t, s, feed)
+	return runPusher(t, client.NewStreamPusher(push, parallel, batch), feed)
 }
 
 func runPusher(t *testing.T, s *client.StreamPusher, feed func(w io.Writer)) []result {
@@ -79,7 +76,7 @@ func runPusher(t *testing.T, s *client.StreamPusher, feed func(w io.Writer)) []r
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("Run did not return after stdin EOF")
 	}
 
@@ -94,13 +91,13 @@ func TestStreamPushReportsEveryPath(t *testing.T) {
 		pushed []string
 	)
 
-	push := func(_ context.Context, paths []string) ([]string, error) {
+	push := func(_ context.Context, paths []string) (map[string]client.PathReport, error) {
 		mu.Lock()
 		defer mu.Unlock()
 
 		pushed = append(pushed, paths...)
 
-		return paths, nil
+		return map[string]client.PathReport{}, nil
 	}
 
 	results := runStream(t, push, 4, 10, func(w io.Writer) {
@@ -135,95 +132,69 @@ func TestStreamPushReportsEveryPath(t *testing.T) {
 func TestStreamPushBatchesUnderLoad(t *testing.T) {
 	t.Parallel()
 
-	// The hook sequences the test: sleeping left the order to the scheduler.
-	waitTaken := func(t *testing.T, taken <-chan string, want string) bool {
-		t.Helper()
-
-		select {
-		case got := <-taken:
-			if got != want {
-				t.Errorf("took %s, want %s", got, want)
-			}
-
-			return got == want
-		case <-time.After(5 * time.Second):
-			t.Errorf("%s was never taken: the batch was fixed while the push was busy", want)
-
-			return false
-		}
-	}
-
 	for _, oneAtATime := range []bool{false, true} {
 		t.Run(fmt.Sprintf("oneAtATime=%v", oneAtATime), func(t *testing.T) {
 			t.Parallel()
 
-			started := make(chan struct{})
-			release := make(chan struct{})
-
-			var (
-				mu      sync.Mutex
-				batches [][]string
-			)
-
-			push := func(_ context.Context, paths []string) ([]string, error) {
-				mu.Lock()
-
-				batches = append(batches, slices.Clone(paths))
-				first := len(batches) == 1
-
-				mu.Unlock()
-
-				if first {
-					close(started)
-					<-release
-				}
-
-				return paths, nil
-			}
-
-			taken := make(chan string, 4)
-
-			s := client.NewStreamPusher(push, 1, 10)
-			s.SetTestHookTaken(func(line string) { taken <- line })
-
-			results := runPusher(t, s, func(w io.Writer) {
-				defer close(release)
-
-				_, _ = io.WriteString(w, "/nix/store/first\n")
-
-				if !waitTaken(t, taken, "/nix/store/first") {
-					return
-				}
-
-				<-started
-
-				lines := []string{"/nix/store/x", "/nix/store/y", "/nix/store/z"}
-				if !oneAtATime {
-					_, _ = io.WriteString(w, strings.Join(lines, "\n")+"\n")
-				}
-
-				for _, p := range lines {
-					if oneAtATime {
-						_, _ = io.WriteString(w, p+"\n")
-					}
-
-					if !waitTaken(t, taken, p) {
-						return
-					}
-				}
-			})
-
-			if len(results) != 4 {
-				t.Fatalf("got %d results, want 4", len(results))
-			}
-
-			mu.Lock()
-			defer mu.Unlock()
-
-			if len(batches) != 2 || len(batches[1]) != 3 {
-				t.Errorf("batches = %v, want [first] then [x y z]", batches)
-			}
+			synctest.Test(t, func(t *testing.T) { testBatchesUnderLoad(t, oneAtATime) })
 		})
+	}
+}
+
+func testBatchesUnderLoad(t *testing.T, oneAtATime bool) {
+	t.Helper()
+
+	release := make(chan struct{})
+
+	var batches [][]string
+
+	push := func(ctx context.Context, paths []string) (map[string]client.PathReport, error) {
+		batches = append(batches, slices.Clone(paths))
+		if len(batches) == 1 {
+			<-release
+		}
+
+		return map[string]client.PathReport{}, ctx.Err()
+	}
+
+	inR, inW := io.Pipe()
+	done := make(chan error, 1)
+
+	var out bytes.Buffer
+
+	go func() { done <- client.NewStreamPusher(push, 1, 10).Run(t.Context(), inR, &out) }()
+
+	write := func(s string) {
+		_, _ = io.WriteString(inW, s)
+
+		synctest.Wait()
+	}
+
+	write("/nix/store/first\n")
+
+	lines := []string{"/nix/store/x\n", "/nix/store/y\n", "/nix/store/z\n"}
+	if !oneAtATime {
+		lines = []string{strings.Join(lines, "")}
+	}
+
+	for _, l := range lines {
+		write(l)
+	}
+
+	close(release)
+
+	_ = inW.Close()
+
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	if n := strings.Count(out.String(), "\n"); n != 4 {
+		t.Errorf("got %d results, want 4", n)
+	}
+
+	if len(batches) != 2 || len(batches[1]) != 3 {
+		t.Errorf("batches = %v, want [first] then [x y z]", batches)
 	}
 }
 
@@ -232,12 +203,12 @@ func TestStreamPushIsolatesFailures(t *testing.T) {
 
 	errBad := errors.New("bad path")
 
-	push := func(_ context.Context, paths []string) ([]string, error) {
+	push := func(_ context.Context, paths []string) (map[string]client.PathReport, error) {
 		if slices.Contains(paths, "/nix/store/bad") {
 			return nil, errBad
 		}
 
-		return paths, nil
+		return map[string]client.PathReport{}, nil
 	}
 
 	results := runStream(t, push, 1, 10, func(w io.Writer) {
@@ -273,7 +244,7 @@ func TestStreamPushGivesUpOnDeadServer(t *testing.T) {
 		calls [][]string
 	)
 
-	push := func(_ context.Context, paths []string) ([]string, error) {
+	push := func(_ context.Context, paths []string) (map[string]client.PathReport, error) {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -330,7 +301,7 @@ func TestStreamPushRequestLine(t *testing.T) {
 		calls []string
 	)
 
-	push := func(_ context.Context, paths []string) ([]string, error) {
+	push := func(_ context.Context, paths []string) (map[string]client.PathReport, error) {
 		mu.Lock()
 
 		calls = append(calls, fmt.Sprintf("%v", paths))
@@ -341,7 +312,7 @@ func TestStreamPushRequestLine(t *testing.T) {
 			return nil, errors.New("boom")
 		}
 
-		return paths, nil
+		return map[string]client.PathReport{}, nil
 	}
 
 	results := runStream(t, push, 1, 10, func(w io.Writer) {
@@ -402,76 +373,152 @@ func TestStreamPushRequestLine(t *testing.T) {
 	}
 }
 
-func TestStreamPushReportsSignatures(t *testing.T) {
+// The answer of a path carries what the push reported for it.
+func TestStreamPushAnswersWithTheReport(t *testing.T) {
 	t.Parallel()
 
-	push := func(_ context.Context, paths []string) ([]string, error) {
+	push := func(_ context.Context, paths []string) (map[string]client.PathReport, error) {
 		if slices.Contains(paths, "/nix/store/bad") {
 			return nil, errors.New("boom")
 		}
 
-		return paths, nil
+		return map[string]client.PathReport{
+			"/nix/store/signed": {Signatures: []string{"key-1:sig"}},
+			"/nix/store/lost":   {OtherBuild: "sha256:abc"},
+			"/nix/store/big":    {Skipped: "too big"},
+		}, nil
 	}
-	sigs := func(p string) []string { return []string{"key-1:" + p} }
-
-	results := runStreamSigned(t, push, sigs, 1, 1, func(w io.Writer) {
-		fmt.Fprintln(w, "/nix/store/a")
-		fmt.Fprintln(w, `{"id":7,"paths":["/nix/store/b"]}`)
-		fmt.Fprintln(w, "/nix/store/bad")
-	})
-
-	got := map[string]result{}
-	for _, r := range results {
-		got[r.Path] = r
-	}
-
-	for _, p := range []string{"/nix/store/a", "/nix/store/b"} {
-		if got[p].Status != "ok" || !slices.Equal(got[p].Signatures, []string{"key-1:" + p}) {
-			t.Errorf("%s: %+v", p, got[p])
-		}
-	}
-
-	if got["/nix/store/bad"].Status != "error" || got["/nix/store/bad"].Signatures != nil {
-		t.Errorf("failed path reports signatures: %+v", got["/nix/store/bad"])
-	}
-}
-
-func TestStreamPushReportsSkippedPaths(t *testing.T) {
-	t.Parallel()
 
 	var out strings.Builder
 
-	s := client.NewStreamPusher(func(_ context.Context, p []string) ([]string, error) { return p, nil }, 1, 1)
-	s.Skipped = func(p string) string { return map[string]string{"/nix/store/big": "too big"}[p] }
-
-	if err := s.Run(t.Context(), strings.NewReader(`{"paths":["/nix/store/big","/nix/store/a"]}`), &out); err != nil {
+	in := `{"id":7,"paths":["/nix/store/signed","/nix/store/lost","/nix/store/big"]}
+/nix/store/signed
+/nix/store/bad
+`
+	if err := client.NewStreamPusher(push, 1, 1).Run(t.Context(), strings.NewReader(in), &out); err != nil {
 		t.Fatal(err)
 	}
 
-	want := `{"path":"/nix/store/big","status":"ok","message":"too big","skipped":"max-nar-size"}
-{"path":"/nix/store/a","status":"ok"}
+	want := `{"id":7,"path":"/nix/store/signed","status":"ok","signatures":["key-1:sig"]}
+{"id":7,"path":"/nix/store/lost","status":"ok","other_build":"sha256:abc"}
+{"id":7,"path":"/nix/store/big","status":"ok","message":"too big","skipped":"max-nar-size"}
+{"path":"/nix/store/signed","status":"ok","signatures":["key-1:sig"]}
+{"path":"/nix/store/bad","status":"error","message":"boom"}
 `
 	if out.String() != want {
 		t.Errorf("got %s", out.String())
 	}
 }
 
-func TestClientSignaturesByStorePath(t *testing.T) {
+// Dependencies get no answer, so nothing is reported for them.
+func TestClientReportsOnlyAskedPaths(t *testing.T) {
 	t.Parallel()
 
-	c := &client.Client{}
-	c.RecordSignatures(
-		map[string]client.NarinfoMetadata{"h1.narinfo": {StorePath: "/nix/store/h1-a"}, "h2.narinfo": {StorePath: "/nix/store/h2-b"}},
-		map[string][]string{"h1.narinfo": {"k:1"}},
-	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `{"signatures":{"a.narinfo":["k:a"],"dep.narinfo":["k:dep"]}}`)
+		}
+	}))
+	t.Cleanup(ts.Close)
 
-	if got := c.Signatures("/nix/store/h1-a"); !slices.Equal(got, []string{"k:1"}) {
-		t.Errorf("signed path: %v", got)
+	c, err := client.NewTestClientForServer(ts.URL)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if got := c.Signatures("/nix/store/h2-b"); got != nil {
-		t.Errorf("unsigned path: %v", got)
+	narinfos := map[string]client.NarinfoMetadata{
+		"a.narinfo":   {StorePath: "/nix/store/a"},
+		"dep.narinfo": {StorePath: "/nix/store/dep"},
 	}
+	pending := map[string]client.PendingObject{
+		"a.narinfo":   {PresignedURL: ts.URL + "/a"},
+		"dep.narinfo": {PresignedURL: ts.URL + "/dep"},
+	}
+	reports := map[string]client.PathReport{"/nix/store/a": {}}
+
+	err = c.SignAndUploadNarinfos(t.Context(), "pushes", map[string]map[string]client.NarinfoMetadata{"1": narinfos}, pending, reports)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(reports) != 1 || !slices.Equal(reports["/nix/store/a"].Signatures, []string{"k:a"}) {
+		t.Errorf("reports: %v", reports)
+	}
+}
+
+// A driver waits for one answer per line, also after a signal.
+func TestStreamPushAnswersEveryLineWhenCanceled(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+
+		var pushes, late atomic.Int32
+
+		push := func(ctx context.Context, _ []string) (map[string]client.PathReport, error) {
+			pushes.Add(1)
+
+			if ctx.Err() != nil {
+				late.Add(1)
+			}
+
+			<-ctx.Done()
+
+			return map[string]client.PathReport{}, ctx.Err()
+		}
+
+		inR, inW := io.Pipe()
+		defer inW.Close()
+
+		var out bytes.Buffer
+
+		done := make(chan error, 1)
+
+		go func() { done <- client.NewStreamPusher(push, 1, 2).Run(ctx, inR, &out) }()
+
+		// a and b are being pushed, the request waits, e is read but not taken.
+		go func() {
+			_, _ = io.WriteString(inW, "/nix/store/a\n/nix/store/b\n"+
+				`{"id":7,"paths":["/nix/store/c","/nix/store/d"]}`+"\n/nix/store/e\n")
+		}()
+
+		synctest.Wait()
+
+		if n := pushes.Load(); n != 1 {
+			t.Fatalf("%d pushes in flight, want 1", n)
+		}
+
+		cancel()
+
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v, want context.Canceled", err)
+		}
+
+		if n := late.Load(); n != 0 {
+			t.Errorf("%d pushes started after the cancellation", n)
+		}
+
+		got := map[string]uint64{}
+
+		for line := range strings.Lines(out.String()) {
+			var r result
+
+			if err := json.Unmarshal([]byte(line), &r); err != nil {
+				t.Fatalf("bad output line %q: %v", line, err)
+			}
+
+			if _, dup := got[r.Path]; dup || r.Status != "error" {
+				t.Errorf("%s: status %s, answered twice: %v", r.Path, r.Status, dup)
+			}
+
+			got[r.Path] = r.ID
+		}
+
+		want := map[string]uint64{"/nix/store/a": 0, "/nix/store/b": 0, "/nix/store/c": 7, "/nix/store/d": 7, "/nix/store/e": 0}
+		if !maps.Equal(got, want) {
+			t.Errorf("answers by request ID = %v, want %v", got, want)
+		}
+	})
 }
 
 // The caller keeps stdin open for the life of the process, so a signal has to end Run.
@@ -493,7 +540,42 @@ func TestStreamPushStopsWhenCanceled(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("Run returned %v, expected cancellation", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("Run still waits for input")
+	}
+}
+
+func TestStreamPushLogLine(t *testing.T) {
+	t.Parallel()
+
+	pusher := client.NewStreamPusher(func(context.Context, []string) (map[string]client.PathReport, error) {
+		return nil, errors.New("a log line must not push paths")
+	}, 1, 10)
+	pusher.PushLog = func(_ context.Context, drvPath string) error {
+		if drvPath == "/nix/store/lost.drv" {
+			return errors.New("no build log")
+		}
+
+		return nil
+	}
+
+	results := runPusher(t, pusher, func(w io.Writer) {
+		_, _ = io.WriteString(w, `{"id":3,"log":"/nix/store/failed.drv"}`+"\n"+
+			`{"id":4,"log":"/nix/store/lost.drv"}`+"\n"+
+			`{"log":"/nix/store/both.drv","paths":["/nix/store/a"]}`+"\n")
+	})
+
+	status := map[string]string{}
+	for _, r := range results {
+		status[fmt.Sprintf("%d %s", r.ID, r.Path)] = r.Status
+	}
+
+	want := map[string]string{
+		"3 /nix/store/failed.drv":                                  "ok",
+		"4 /nix/store/lost.drv":                                    "error",
+		`0 {"log":"/nix/store/both.drv","paths":["/nix/store/a"]}`: "error",
+	}
+	if !maps.Equal(status, want) {
+		t.Fatalf("got %v, want %v", status, want)
 	}
 }

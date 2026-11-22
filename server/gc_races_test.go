@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Mic92/niks3/api"
+	"github.com/Mic92/niks3/internal/testwait"
 	"github.com/Mic92/niks3/server"
 	"github.com/Mic92/niks3/server/pg"
 	"github.com/minio/minio-go/v7"
@@ -315,7 +316,7 @@ func TestCreatePendingClosureVerifyS3FailureReleasesConnection(t *testing.T) {
 
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(testwait.Hung):
 			t.Errorf("Pool.Close() hangs: a connection with an open transaction was never released")
 		}
 	}()
@@ -371,10 +372,11 @@ func TestForceGCDuringPushOffersSweptObject(t *testing.T) {
 
 	for _, point := range []struct {
 		name string
-		set  func(*server.Service, func())
+		set  func(*testing.T, *server.Service, string, func())
+		at   string
 	}{
-		{"before pending rows", (*server.Service).SetTestHookBeforePendingInsert},
-		{"after presence check", (*server.Service).SetTestHookAfterPresenceCheck},
+		{"before pending rows", beforeQuery, "JoinRecordingPushes"},
+		{"after presence check", afterQuery, "GetExistingObjects"},
 	} {
 		t.Run(point.name, func(t *testing.T) {
 			t.Parallel()
@@ -396,7 +398,7 @@ func TestForceGCDuringPushOffersSweptObject(t *testing.T) {
 
 			gcRuns := 0
 
-			point.set(service, func() {
+			point.set(t, service, point.at, func() {
 				gcRuns++
 
 				st := service.RunGCForTest(0, 24*time.Hour, true)
@@ -536,7 +538,7 @@ func TestSweepSkipsRowsLockedByPush(t *testing.T) {
 		if st.State != "succeeded" {
 			t.Fatalf("GC failed: %s", st.Error)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testwait.Hung):
 		ok(t, tx.Commit(ctx))
 		<-done
 		t.Fatal("the sweep waits for a row a push holds instead of skipping it")
@@ -554,29 +556,6 @@ func TestSweepSkipsRowsLockedByPush(t *testing.T) {
 
 	if objectInS3(t, service, key) {
 		t.Errorf("%s survived the sweep after the push released it", key)
-	}
-}
-
-// Registering an upload needs a pending row: it is what keeps the sweep away
-// from the object, so without one the row would outlive its object.
-func TestRegisterCompletedObjectNeedsPendingRow(t *testing.T) {
-	t.Parallel()
-
-	service := createTestService(t)
-	defer service.Close()
-
-	ctx := t.Context()
-	key := "nar/" + strings.Repeat("f", 52) + ".nar.zst"
-
-	ok(t, pg.New(service.Pool).RegisterCompletedObject(ctx, pg.RegisterCompletedObjectParams{
-		Key: key, Refs: []string{},
-	}))
-
-	var n int
-	ok(t, service.Pool.QueryRow(ctx, "SELECT count(*) FROM objects WHERE key = $1", key).Scan(&n))
-
-	if n != 0 {
-		t.Errorf("registered %s without a pending row", key)
 	}
 }
 
@@ -633,7 +612,7 @@ func TestSweepRechecksPendingAfterLocking(t *testing.T) {
 		VALUES ($1, '{}', timezone('UTC', now()) - interval '1 hour', timezone('UTC', now()) - interval '1 hour')`, key)
 	ok(t, err)
 
-	service.SetTestHookAfterSweepSelect(func() {
+	afterQuery(t, service, "LockObjectsReadyForDeletion", func() {
 		q := pg.New(service.Pool)
 
 		pc, err := q.InsertPendingClosure(ctx, "late.narinfo")
@@ -695,7 +674,7 @@ func TestPushWaitsForSweepHoldingRow(t *testing.T) {
 		if code != http.StatusOK {
 			t.Errorf("status=%d", code)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testwait.Hung):
 		t.Fatal("push still blocked after the sweep committed")
 	}
 }
@@ -705,7 +684,7 @@ func TestPushWaitsForSweepHoldingRow(t *testing.T) {
 func waitForLockWaiter(t *testing.T, service *server.Service) {
 	t.Helper()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testwait.Hung)
 
 	for {
 		var waiting int
@@ -785,7 +764,7 @@ func TestCommitRacingPendingCleanupKeepsObjects(t *testing.T) {
 		if st.State != "succeeded" {
 			t.Fatalf("GC failed: %s", st.Error)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(testwait.Hung):
 		ok(t, holder.Rollback(ctx))
 		t.Fatal("the cleanup waits for a closure being committed instead of skipping it")
 	}

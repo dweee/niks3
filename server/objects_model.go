@@ -47,10 +47,6 @@ func (s *Service) sweepBatch(ctx context.Context, gracePeriod int32, afterKey st
 		return "", nil, nil
 	}
 
-	if s.testHookAfterSweepSelect != nil {
-		s.testHookAfterSweepSelect()
-	}
-
 	unpending, err := pg.New(tx).GetKeysNotPending(ctx, keys)
 	if err != nil {
 		return "", nil, fmt.Errorf("recheck pending objects: %w", err)
@@ -93,6 +89,10 @@ func (s *Service) sweepBatch(ctx context.Context, gracePeriod int32, afterKey st
 		return "", s3Errs, fmt.Errorf("delete object rows: %w", err)
 	}
 
+	if err := pg.New(tx).DeleteClaims(ctx, deleted); err != nil {
+		return "", s3Errs, fmt.Errorf("delete claims: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return "", s3Errs, fmt.Errorf("commit sweep transaction: %w", err)
 	}
@@ -114,13 +114,25 @@ func (s *Service) cleanupOrphanObjects(ctx context.Context, gracePeriod int32, o
 		}
 	}
 
-	marked, err := pg.New(s.Pool).MarkStaleObjects(ctx)
-	if err != nil {
-		return stats, fmt.Errorf("failed to mark stale objects: %w", err)
+	// Without a grace period the second mark comes right away.
+	marks := 1
+	if gracePeriod == 0 {
+		marks = 2
 	}
 
-	stats.MarkedCount = int(marked)
-	notify()
+	for range marks {
+		if err := pg.New(s.Pool).AwaitRecordingPushes(ctx, recordingPushesLockKey); err != nil {
+			return stats, fmt.Errorf("failed to wait for recording pushes: %w", err)
+		}
+
+		marked, err := pg.New(s.Pool).MarkStaleObjects(ctx)
+		if err != nil {
+			return stats, fmt.Errorf("failed to mark stale objects: %w", err)
+		}
+
+		stats.MarkedCount = int(marked)
+		notify()
+	}
 
 	var errs []error
 
