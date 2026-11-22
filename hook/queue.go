@@ -170,11 +170,17 @@ func (q *Queue) Remove(paths []string) error {
 	defer q.mu.Unlock()
 
 	if q.roots != nil {
+		// The worker passes whole uploaded closures, which include derivations
+		// and sources. Enqueue rejects those, so they can never be queued or
+		// rooted here; skip them rather than abandoning the whole removal, which
+		// would leave every published output rooted and queued forever.
+		outputs := paths[:0:0]
 		for _, p := range paths {
-			if err := validateOutputPath(p); err != nil {
-				return err
+			if validateOutputPath(p) == nil {
+				outputs = append(outputs, p)
 			}
 		}
+		paths = outputs
 	}
 	if err := q.remove(paths); err != nil {
 		return err

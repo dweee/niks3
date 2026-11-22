@@ -418,3 +418,26 @@ func TestWorkerUploadsDanglingSymlinkOutput(t *testing.T) {
 	}
 	requireQueueCount(t, q, 0)
 }
+
+func TestRootedQueueRemoveSkipsNonOutputClosureMembers(t *testing.T) {
+	t.Parallel()
+	f := newRootFixture(t)
+	q := f.open(t)
+	output := fixtureOutput("published-output")
+	if err := q.Enqueue([]string{output}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	requireRoot(t, f, output, true)
+	// A published closure also lists derivations and sources; they were never
+	// queued and must not abort removal of the queued output.
+	closure := []string{
+		"/nix/store/cblshqv4b81g5gxis3zpb4inagkaffi1-binutils-2.46.0.tar.xz.drv",
+		output,
+		"/nix/store/nhga4waglazifh79z355i4kcy3pfpnh5-source.drv",
+	}
+	if err := q.Remove(closure); err != nil {
+		t.Fatalf("Remove with derivations in the closure: %v", err)
+	}
+	requireQueueCount(t, q, 0)
+	requireRoot(t, f, output, false)
+}
