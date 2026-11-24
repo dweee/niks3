@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "inputs": {
+    "nixpkgs": {
+      "source": "github:NixOS/nixpkgs/nixos-unstable-small"
+    },
+    "treefmt-nix": {
+      "source": "github:numtide/treefmt-nix"
+    }
+  }
+}
