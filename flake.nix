@@ -2,9 +2,9 @@
   description = "Development environment for this project";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable-small";
+    nixpkgs.url = "github:NixOS/nixpkgs/52a93865f031ba894c0d19121dda6b75c0f2b2b8";
 
-    treefmt-nix.url = "github:numtide/treefmt-nix";
+    treefmt-nix.url = "github:numtide/treefmt-nix/a0a97e31a897a3537eea5c49df4f8adaa83b3b37";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
   };
 
