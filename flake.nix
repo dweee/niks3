@@ -2,7 +2,7 @@
   description = "Development environment for this project";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/aa156634ecca12217a808ff1d8fc2793115923bb";
+    nixpkgs.url = "github:NixOS/nixpkgs/171cb8d3b7fb1dfee5d7d4e11db06bd42201653f";
 
     treefmt-nix.url = "github:numtide/treefmt-nix/b7b56d3c8833016c650ca542b1230e6130299741";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
