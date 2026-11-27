@@ -73,6 +73,13 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Reclaim hosted runner space for Nix
+        if: ${{ runner.os == 'Linux' || runner.arch == 'ARM64' }}
+        uses: wimpysworld/nothing-but-nix@c42920bb7515b766b1c69f5db46cb13124270f7e
+        with:
+          hatchet-protocol: cleave
+          root-safe-haven: ${{ runner.os == 'Linux' && '16384' || 'auto' }}
+          witness-carnage: true
       - uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
         with:
           source-tag: v3.24.1
@@ -90,6 +97,7 @@ jobs:
             extra-trusted-public-keys = niks3.monke.fail-1:q13GqiZgAxx7SyoLZInXoJjviZMOdNpfG03xs0VUD2M=
             max-jobs = 1
             cores = 3
+            ${{ runner.os == 'Linux' && 'build-dir = /nix/build' || '' }}
       - name: Verify Determinate client and daemon
         run: |
           nix --version | grep -F "Determinate Nix 3.24.1"
