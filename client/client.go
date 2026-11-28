@@ -30,6 +30,8 @@ const compressionZstd = "zstd"
 type Client struct {
 	baseURL                 *url.URL
 	tokenSource             TokenSource
+	upstream                *upstreamFilter
+	KeepUploadRoots         bool // Preserve explicitly pinned roots even if already available upstream
 	httpClient              *http.Client
 	MaxConcurrentNARUploads int                            // Maximum number of concurrent uploads (0 = unlimited)
 	NixEnv                  []string                       // Optional environment variables for nix commands (for testing)

@@ -17,6 +17,7 @@ let
     ratelimit = ../../ratelimit;
     testwait = ../../internal/testwait;
     server = ../../server;
+    signing = ../../server/signing;
     cmd-niks3 = ../../cmd/niks3;
     cmd-niks3-server = ../../cmd/niks3-server;
     cmd-niks3-hook = ../../cmd/niks3-hook;

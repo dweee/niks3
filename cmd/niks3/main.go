@@ -221,6 +221,10 @@ func pushCommand(serverURL string, ts client.TokenSource, paths []string, maxCon
 
 	c.MaxConcurrentNARUploads = maxConcurrent
 	c.VerifyS3Integrity = verifyS3Integrity
+	if err := c.ConfigureUpstreamsFromEnvironment(); err != nil {
+		return fmt.Errorf("configuring upstream substituters: %w", err)
+	}
+	c.KeepUploadRoots = pinName != "" || os.Getenv("NIKS3_KEEP_UPLOAD_ROOTS") == "1"
 	c.Retry.Timeout = retryTimeout
 
 	defer c.WaitRegistrations()
@@ -262,6 +266,9 @@ func pushStdinCommand(serverURL string, ts client.TokenSource, maxConcurrent, pa
 
 	c.MaxConcurrentNARUploads = maxConcurrent
 	c.VerifyS3Integrity = verifyS3Integrity
+	if err := c.ConfigureUpstreamsFromEnvironment(); err != nil {
+		return fmt.Errorf("configuring upstream substituters: %w", err)
+	}
 	c.Retry.Timeout = retryTimeout
 
 	defer c.WaitRegistrations()
