@@ -50,6 +50,8 @@ type StreamResult struct {
 	Skipped string `json:"skipped,omitempty"`
 	// What the server signed the path with, so the caller can add them to its own store.
 	Signatures []string `json:"signatures,omitempty"`
+	// The exact root has a trusted signature and a reachable NAR upstream.
+	Upstream bool `json:"upstream,omitempty"`
 	// NAR hash the cache serves for the path, when another build of it was
 	// published first. The pushed build is not in the cache.
 	OtherBuild string `json:"other_build,omitempty"`
@@ -257,7 +259,7 @@ func (s *StreamPusher) answer(ctx context.Context, j streamJob) []StreamResult {
 }
 
 func okResult(id uint64, path string, report PathReport) StreamResult {
-	res := StreamResult{ID: id, Path: path, Status: streamStatusOK, Signatures: report.Signatures, OtherBuild: report.OtherBuild}
+	res := StreamResult{ID: id, Path: path, Status: streamStatusOK, Signatures: report.Signatures, Upstream: report.Upstream, OtherBuild: report.OtherBuild}
 	if report.Skipped != "" {
 		res.Skipped, res.Message = streamSkippedMaxNarSize, report.Skipped
 	}

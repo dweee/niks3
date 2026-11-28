@@ -403,6 +403,7 @@ type narinfoTask struct {
 
 // PathReport tells what a push did with one of the paths it was given.
 type PathReport struct {
+	Upstream bool // Exact signed root available from a configured upstream
 	// Signatures is what the server signed the path with.
 	Signatures []string
 	// OtherBuild is the NAR hash the cache serves when another build of the
@@ -637,6 +638,11 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 			return nil, nil, err
 		}
 		if len(external) > 0 {
+			for _, root := range resolvedPaths {
+				if external[root] {
+					reports[root] = PathReport{Upstream: true}
+				}
+			}
 			resolvedPaths, graph = localClosure(resolvedPaths, pathInfos, external)
 		}
 		if len(resolvedPaths) == 0 {
@@ -716,7 +722,7 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 		}
 	}
 
-	cachedPaths := len(pathInfos) - newPaths
+	cachedPaths := len(uploadInfos) - newPaths
 
 	slog.Info(fmt.Sprintf("Uploading %d paths to %s (%d already cached)", newPaths, c.baseURL.Hostname(), cachedPaths))
 	slog.Debug("Need to upload objects", "pending", len(pendingObjects), "closures", len(pendingByClosureID))
