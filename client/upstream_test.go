@@ -39,6 +39,8 @@ func TestUpstreamRequiresExactSignedAvailableObject(t *testing.T) {
 		want           bool
 	}{
 		{"exact", narinfo, http.StatusOK, true},
+		{"exact without FileSize", strings.Replace(narinfo, "FileSize: 512\n", "", 1), http.StatusOK, true},
+		{"wrong file size", strings.Replace(narinfo, "FileSize: 512", "FileSize: 513", 1), http.StatusOK, false},
 		{"different content", strings.Replace(narinfo, "NarSize: 1024", "NarSize: 1025", 1), http.StatusOK, false},
 		{"different refs", strings.Replace(narinfo, "-lib", "-other", 1), http.StatusOK, false},
 		{"untrusted signature", strings.Replace(narinfo, "Sig: upstream:", "Sig: other:", 1), http.StatusOK, false},

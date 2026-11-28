@@ -161,7 +161,7 @@ func (f *upstreamFilter) contains(ctx context.Context, path string, info *PathIn
 		resp, err = f.http.Do(req)
 		if err == nil {
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && resp.ContentLength == fileSize {
+			if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 && (fileSize == 0 || resp.ContentLength == fileSize) {
 				return true
 			}
 		}
@@ -193,9 +193,12 @@ func (f *upstreamFilter) matchNarinfo(body io.Reader, localFingerprint []byte, p
 	if scan.Err() != nil || err != nil || fields["StorePath"] != path {
 		return "", 0
 	}
-	fileSize, err := strconv.ParseInt(fields["FileSize"], 10, 64)
-	if err != nil || fileSize <= 0 {
-		return "", 0
+	var fileSize int64
+	if raw, present := fields["FileSize"]; present {
+		fileSize, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || fileSize <= 0 {
+			return "", 0
+		}
 	}
 	refs := strings.Fields(fields["References"])
 	for i := range refs {

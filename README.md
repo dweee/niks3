@@ -93,8 +93,8 @@ their trusted Nix public keys. This applies to `niks3 push` (including streaming
 and `niks3-hook serve`. Leave both unset to publish complete closures.
 
 Each store path is checked for a signed narinfo matching its store path, NAR hash,
-size and references. The remote NAR must also answer a size-matching HEAD
-request. Paths that cannot be confirmed remain eligible for upload. Consumers
+size and references. The remote NAR must answer a HEAD request with a positive
+content length that matches FileSize when supplied. Paths that cannot be confirmed remain eligible for upload. Consumers
 must enable the selected substituters and trust their keys to restore a mixed
 closure. Use only upstreams whose availability your consumers can depend on.
 
