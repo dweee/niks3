@@ -19,6 +19,7 @@ pkgs.buildGoModule {
       common.commonFiles
       common.srcsNoTests.api
       common.srcsNoTests.client
+      common.srcsNoTests.signing
       common.srcsNoTests.cmdutil
       common.srcsNoTests.hook
       common.srcsNoTests.ratelimit

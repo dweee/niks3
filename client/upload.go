@@ -110,6 +110,10 @@ type PrepareClosuresResult struct {
 // Realisations are queried for CA derivations and included automatically.
 // topLevelPaths specifies which paths are closure roots - one ClosureInfo is created per top-level path.
 func PrepareClosures(ctx context.Context, topLevelPaths []string, pathInfos map[string]*PathInfo, nixEnv []string) (*PrepareClosuresResult, error) {
+	return prepareClosures(ctx, topLevelPaths, pathInfos, pathInfos, nixEnv)
+}
+
+func prepareClosures(ctx context.Context, topLevelPaths []string, pathInfos, graph map[string]*PathInfo, nixEnv []string) (*PrepareClosuresResult, error) {
 	pathInfoByHash := make(map[string]*PathInfo)
 	narKeyToHash := make(map[string]string)
 	logPathsByKey := make(map[string]string)
@@ -137,7 +141,7 @@ func PrepareClosures(ctx context.Context, topLevelPaths []string, pathInfos map[
 		// Extract references as object keys (hash.narinfo)
 		var references []string
 
-		for _, ref := range pathInfo.References {
+		for _, ref := range graph[storePath].References {
 			refHash, err := GetStorePathHash(ref)
 			if err != nil {
 				return nil, fmt.Errorf("getting reference hash: %w", err)
@@ -204,7 +208,7 @@ func PrepareClosures(ctx context.Context, topLevelPaths []string, pathInfos map[
 	}
 
 	// Second pass: compute closure membership for each top-level path
-	closureMembership := computeClosureMembership(topLevelPaths, pathInfos)
+	closureMembership := computeClosureMembership(topLevelPaths, graph)
 
 	// Third pass: create one ClosureInfo per top-level path with only its reachable objects
 	closures := make([]ClosureInfo, 0, len(topLevelPaths))
@@ -399,6 +403,7 @@ type narinfoTask struct {
 
 // PathReport tells what a push did with one of the paths it was given.
 type PathReport struct {
+	Upstream bool // Exact signed root available from a configured upstream
 	// Signatures is what the server signed the path with.
 	Signatures []string
 	// OtherBuild is the NAR hash the cache serves when another build of the
@@ -579,8 +584,8 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 
 	// Skip cached closures before the local closure walk, unless S3
 	// verification asks to check what the database believes present.
-	if c.VerifyS3Integrity {
-		slog.Debug("Verifying S3 integrity, not skipping cached closures")
+	if c.VerifyS3Integrity || c.upstream != nil {
+		slog.Debug("Checking closure objects before upload")
 	} else if present, err := c.ClosuresExist(ctx, resolvedPaths); err != nil {
 		slog.Debug("Cannot ask for pushed closures, pushing everything", "error", err)
 	} else if len(present) > 0 {
@@ -619,6 +624,33 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 		closurePaths = append(closurePaths, storePath)
 	}
 
+	graph := pathInfos
+	var external map[string]bool
+	if c.upstream != nil {
+		keep := make(map[string]bool)
+		if c.KeepUploadRoots {
+			for _, root := range resolvedPaths {
+				keep[root] = true
+			}
+		}
+		external = c.upstream.available(ctx, pathInfos, keep)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		if len(external) > 0 {
+			for _, root := range resolvedPaths {
+				if external[root] {
+					reports[root] = PathReport{Upstream: true}
+				}
+			}
+			resolvedPaths, graph = localClosure(resolvedPaths, pathInfos, external)
+		}
+		if len(resolvedPaths) == 0 {
+			slog.Info("Every closure path is available from upstream")
+			return closurePaths, report(), nil
+		}
+	}
+
 	// Skip closures containing paths larger than the server's max NAR size.
 	var maxNarSize uint64
 
@@ -630,11 +662,19 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 
 	var skipped skippedUploads
 
-	resolvedPaths, pathInfos, skipped = filterOversizedClosures(resolvedPaths, pathInfos, maxNarSize)
+	resolvedPaths, graph, skipped = filterOversizedClosures(resolvedPaths, graph, maxNarSize)
 	c.ReportSkippedUploads(ctx, skipped.Paths, skipped.NarBytes)
 
-	for p, why := range skipped.Reasons {
-		reports[p] = PathReport{Skipped: why}
+	for _, root := range given {
+		if len(skipped.Reasons) == 0 {
+			break
+		}
+		for _, localRoot := range firstLocalPaths([]string{root}, pathInfos, external) {
+			if why := skipped.Reasons[localRoot]; why != "" {
+				reports[root] = PathReport{Skipped: why}
+				break
+			}
+		}
 	}
 
 	if len(resolvedPaths) == 0 {
@@ -644,7 +684,11 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 	}
 
 	// Prepare closures - one per top-level path
-	result, err := PrepareClosures(ctx, resolvedPaths, pathInfos, c.NixEnv)
+	uploadInfos := make(map[string]*PathInfo, len(graph))
+	for path := range graph {
+		uploadInfos[path] = pathInfos[path]
+	}
+	result, err := prepareClosures(ctx, resolvedPaths, uploadInfos, graph, c.NixEnv)
 	if err != nil {
 		return nil, nil, fmt.Errorf("preparing closures: %w", err)
 	}
@@ -678,7 +722,7 @@ func (c *Client) pushPathsOnce(ctx context.Context, paths []string) ([]string, m
 		}
 	}
 
-	cachedPaths := len(pathInfos) - newPaths
+	cachedPaths := len(uploadInfos) - newPaths
 
 	slog.Info(fmt.Sprintf("Uploading %d paths to %s (%d already cached)", newPaths, c.baseURL.Hostname(), cachedPaths))
 	slog.Debug("Need to upload objects", "pending", len(pendingObjects), "closures", len(pendingByClosureID))

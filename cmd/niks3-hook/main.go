@@ -185,6 +185,9 @@ func runServe() error {
 
 	c.MaxConcurrentNARUploads = *maxConcurrent
 	c.VerifyS3Integrity = *verifyS3
+	if err := c.ConfigureUpstreamsFromEnvironment(); err != nil {
+		return fmt.Errorf("configuring upstream substituters: %w", err)
+	}
 
 	// Notification channels: the server notifies both the worker and the
 	// idle timer when new paths are queued. Separate channels avoid the

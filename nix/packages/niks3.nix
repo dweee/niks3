@@ -18,6 +18,7 @@ pkgs.buildGoModule {
       common.commonFiles
       common.srcsNoTests.api
       common.srcsNoTests.client
+      common.srcsNoTests.signing
       common.srcsNoTests.cmdutil
       common.srcsNoTests.ratelimit
       common.srcsNoTests.cmd-niks3

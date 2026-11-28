@@ -85,6 +85,24 @@ niks3 implements the [Nix binary cache specification](https://nixos.org/manual/n
 - S3 credentials via static keys (`--s3-access-key` / `--s3-secret-key`) or IAM (`--s3-use-iam` for IRSA, EC2 instance profiles, ECS task roles)
 - [Automatic upload](https://github.com/Mic92/niks3/wiki/Auto-Upload) via post-build-hook with crash-safe SQLite queue
 
+## Skip uploads available from upstream substituters
+
+Set `NIKS3_UPSTREAM_SUBSTITUTERS` to a space-separated list of public HTTPS
+binary caches available to your consumers and `NIKS3_UPSTREAM_PUBLIC_KEYS` to
+their trusted Nix public keys. This applies to `niks3 push` (including streaming)
+and `niks3-hook serve`. Leave both unset to publish complete closures.
+
+Each store path is checked for a signed narinfo matching its store path, NAR hash,
+size and references. The remote NAR must answer a HEAD request with a positive
+content length that matches FileSize when supplied. Paths that cannot be confirmed remain eligible for upload. Consumers
+must enable the selected substituters and trust their keys to restore a mixed
+closure. Use only upstreams whose availability your consumers can depend on.
+
+Content-addressed paths can need separate realisation metadata and are kept.
+`niks3 push --pin` keeps its root in the destination. Set
+`NIKS3_KEEP_UPLOAD_ROOTS=1` for non-streaming pushes whose roots will be pinned
+separately; their dependencies are still checked against upstreams.
+
 ## Choosing an S3 Provider
 
 niks3 works with any S3-compatible storage provider. We recommend **Cloudflare R2** for most users due to zero egress fees and excellent performance.
